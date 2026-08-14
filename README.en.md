@@ -1,93 +1,46 @@
-# DeepSeek Harness Desktop
+# DeepSeeker
 
-[中文](README.md) | English
+[中文](README.zh.md) | English
 
-DeepSeek Harness, packaged as a ready-to-use desktop application.
+**The DeepSeek Agent anyone can use.**
 
-DeepSeek officially provides a local Web UI launched from the command line. This project adds an Electron desktop shell on top of the official DeepSeek Harness, handling startup and management of the local Harness service so users can get started without configuring Node.js or running commands.
+DeepSeeker puts the official DeepSeek Harness inside a desktop app. Download it, open it, paste your API key, and start working.
+
+No Node.js setup. No terminal. No localhost or port management.
+
+## First Release
+
+- Native desktop app for Apple Silicon Macs
+- First-run DeepSeek API key setup
+- Automatic local Harness startup and supervision
+- System tray support after the main window closes
+- Existing Harness workspaces, sessions, plugins, and agent features
+- Local application data and Harness service
+
+A Windows installer will follow after the macOS release is stable.
 
 <a id="run"></a>
-
-## Download
-
-| Platform | Availability |
-| --- | --- |
-| macOS Apple Silicon | Supported |
-| macOS Intel | Planned |
-| Windows x64 | Supported |
-
-Visit [deepseekdesktop.com](https://deepseekdesktop.com) to download the latest version.
-
-## Preview
-
-<p align="center">
-  <img src="assets/desktop-preview.png" alt="DeepSeek Harness Desktop preview" width="100%">
-</p>
-
-## Features
-
-- Packages DeepSeek Harness as a native desktop application
-- Automatically starts and manages the local Harness service
-- Does not require users to install Node.js or run commands manually
-- Supports running from the system tray
-- Optimizes the window and interface for macOS and Windows
-- Preserves the official Harness plugin system and local Web UI
-- Keeps application data and the Harness service running locally
-
-## Relationship to the Official Project
-
-This project is built on [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness).
-
-The core capabilities, plugin system, and Web UI come from the official DeepSeek Harness project. This project primarily provides:
-
-- Electron desktop packaging
-- Local service lifecycle management
-- Desktop window and system tray integration
-- macOS and Windows installer builds and releases
-- Interface adaptations for desktop environments
-
-If you prefer to run Harness from the command line or contribute to its core functionality, refer to the official repository first.
-
 <a id="run-from-source"></a>
 
-## Development
-
-The desktop application is located in:
-
-```text
-apps/desktop
-```
-
-Install the dependencies and start the desktop application:
+## Run Locally
 
 ```sh
 pnpm install
 pnpm run dev:desktop
 ```
 
-## Community
+Build an unsigned ZIP for the current platform:
 
-Choose whichever platform you prefer to discuss usage, plugin development, and project updates.
+```sh
+pnpm run package:desktop
+```
 
-<table>
-  <thead>
-    <tr>
-      <th align="center">WeChat Group</th>
-      <th align="center">QQ Group</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td align="center"><img src="assets/community-wechat-group.png" alt="DeepSeek Harness Desktop WeChat group QR code" width="180" height="180"></td>
-      <td align="center"><img src="assets/community-qq-group.jpg" alt="DeepSeek Harness Desktop QQ group QR code" width="180" height="180"></td>
-    </tr>
-  </tbody>
-</table>
+## Upstream
 
-Discord: [Join the DeepSeek Harness Desktop community](https://discord.gg/TJeGqKRNM)
+DeepSeeker builds on [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) and the community [deepseek-harness-desktop](https://github.com/anywhere-labs/deepseek-harness-desktop) project.
 
-## License
+DeepSeek provides the Harness core, plugin system, and Web UI. DeepSeeker owns the desktop packaging, installation experience, brand, and consumer-facing product work.
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the [MIT License](LICENSE) and retains the original copyright and attribution notices.
 
-> This is a community desktop edition built on DeepSeek Harness. It is not an official DeepSeek product.
+> DeepSeeker is an independent community product. It is not affiliated with or endorsed by DeepSeek.

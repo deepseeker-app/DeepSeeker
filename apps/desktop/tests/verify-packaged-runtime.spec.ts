@@ -8,7 +8,7 @@ function context(appOutDir: string, electronPlatformName = 'darwin') {
   return {
     appOutDir,
     electronPlatformName,
-    packager: { appInfo: { productFilename: 'DeepSeek Harness' } },
+    packager: { appInfo: { productFilename: 'DeepSeeker' } },
   } as Parameters<typeof afterPack>[0]
 }
 
@@ -16,7 +16,7 @@ describe('packaged desktop runtime verification', () => {
   it('accepts both packaged Host entrypoints', async () => {
     const appOutDir = await mkdtemp(join(tmpdir(), 'dsh-packaged-runtime-'))
     try {
-      const resources = join(appOutDir, 'DeepSeek Harness.app', 'Contents', 'Resources', 'host', 'node_modules')
+      const resources = join(appOutDir, 'DeepSeeker.app', 'Contents', 'Resources', 'host', 'node_modules')
       const cli = join(resources, '@deepseek-ai', 'dsh', 'lib', 'bin.js')
       const web = join(resources, '@deepseek-ai', 'dsh-web-frontend', 'dist', 'index.html')
       await mkdir(join(cli, '..'), { recursive: true })

@@ -73,12 +73,12 @@ import { REPO_ROOT, requireDist } from './support.ts'
 // } from '@deepseek-ai/dsh-client-ui-settings-models'
 export const WELCOME_NOTICE_SETTINGS_NAMESPACE = 'ui-onboarding'
 export const WELCOME_NOTICE_ACK_FIELD = 'welcomeNoticeVersion'
-export const WELCOME_NOTICE_VERSION = '2026-08-13.1'
+export const WELCOME_NOTICE_VERSION = '2026-08-14.1'
 export const WELCOME_NOTICE_COPY = {
   zh: {
-    title: '内测声明',
-    body: 'DeepSeek Harness 目前的 0.1 版本仍处在面向 Harness 开发者进行测试的阶段，还有许多地方需要持续改进和打磨，希望听取广大开发者的反馈建议。预计 DeepSeek Harness 的核心插件以及基础 API 都会在接下来的一段时间内快速迭代、持续演化。\n\n我们期待与全球开发者一起，在开源、开放、可复用、可组合的基础设施之上，共同探索智能上限。欢迎全球 Harness 开发者加入 DSH 插件生态。',
-    continueLabel: '继续',
+    title: '欢迎使用 DeepSeeker',
+    body: 'DeepSeeker 目前还是早期版本，部分功能会跟着 DeepSeek Harness 快速更新。\n\n接下来只需要添加一个 DeepSeek API Key。Key 保存在本机，之后打开应用就能直接使用。',
+    continueLabel: '开始设置',
   },
 } as const
 

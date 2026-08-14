@@ -46,6 +46,7 @@ export function releaseMac(): void {
   const buildEnvironment = sanitizedEnvironment(releaseEnvironment)
   run('pnpm', ['--workspace-root', 'run', 'build'], desktopRoot, buildEnvironment)
   run('node', ['--import', 'tsx', 'scripts/stage-runtime.ts'], desktopRoot, buildEnvironment)
+  run('node', ['--import', 'tsx', 'scripts/ensure-electron-runtime.ts'], desktopRoot, buildEnvironment)
   run('pnpm', [
     'exec', 'electron-builder', '--mac', 'dmg',
     '--config.forceCodeSigning=true', '--config.mac.notarize=true',

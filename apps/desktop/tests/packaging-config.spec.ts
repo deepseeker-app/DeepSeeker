@@ -5,8 +5,11 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 interface DesktopPackage {
+  readonly description: string
   readonly scripts: Readonly<Record<string, string>>
   readonly build: {
+    readonly appId: string
+    readonly productName: string
     readonly afterPack: string
     readonly electronDist: string
     readonly extraResources: readonly {
@@ -30,6 +33,8 @@ const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const repositoryRoot = resolve(desktopRoot, '../..')
 const workspaceConfiguration = readFileSync(resolve(repositoryRoot, 'pnpm-workspace.yaml'), 'utf8')
 const builderPatch = readFileSync(resolve(repositoryRoot, 'patches/app-builder-lib@26.15.3.patch'), 'utf8')
+const stageRuntime = readFileSync(resolve(desktopRoot, 'scripts/stage-runtime.ts'), 'utf8')
+const packageDesktop = readFileSync(resolve(desktopRoot, 'scripts/package-desktop.ts'), 'utf8')
 const desktopPackage = JSON.parse(
   readFileSync(resolve(desktopRoot, 'package.json'), 'utf8'),
 ) as DesktopPackage
@@ -38,6 +43,12 @@ const rootPackage = JSON.parse(
 ) as RootPackage
 
 describe('desktop packaging configuration', () => {
+  it('ships the DeepSeeker product identity', () => {
+    expect(desktopPackage.description).toBe('DeepSeeker desktop agent powered by DeepSeek Harness')
+    expect(desktopPackage.build.appId).toBe('com.deepseeker.desktop')
+    expect(desktopPackage.build.productName).toBe('DeepSeeker')
+  })
+
   it('packages the installed Electron distribution', () => {
     expect(desktopPackage.build.electronDist).toBe('node_modules/electron/dist')
     expect(workspaceConfiguration).toContain("'app-builder-lib@26.15.3>@electron/get': '3.1.0'")
@@ -49,6 +60,7 @@ describe('desktop packaging configuration', () => {
       { from: 'runtime-host/node_modules', to: 'host/node_modules' },
     ]))
     expect(desktopPackage.build.afterPack).toBe('./scripts/verify-packaged-runtime.ts')
+    expect(stageRuntime).toContain("'--config.allow-unused-patches=true'")
   })
 
   it('unlocks the temporary signing Keychain with its own password', () => {
@@ -63,7 +75,7 @@ describe('desktop packaging configuration', () => {
     const icon = readFileSync(resolve(desktopRoot, 'build/icon.png'))
 
     expect(createHash('sha256').update(icon).digest('hex'))
-      .toBe('e9fa2ac692491c051536fb5d322e7eefe874d3977892e82852295d137bf27d91')
+      .toBe('cb344c36152b51860406fe69cbcd1d63a44f22132b896310a3230584def7a4e7')
     expect(desktopPackage.build.mac.icon).toBe('build/icon.png')
     expect(desktopPackage.build.win.icon).toBe('build/icon.png')
   })
@@ -72,9 +84,19 @@ describe('desktop packaging configuration', () => {
     for (const name of ['package', 'dist']) {
       expect(desktopPackage.scripts[name]).toContain('pnpm --workspace-root run build')
       expect(desktopPackage.scripts[name]).toContain('scripts/stage-runtime.ts')
+      expect(desktopPackage.scripts[name]).toContain('scripts/ensure-electron-runtime.ts')
     }
-    expect(desktopPackage.scripts.package).toContain('electron-builder --dir')
+    expect(desktopPackage.scripts.package).toContain('scripts/package-desktop.ts')
     expect(desktopPackage.scripts.package).not.toContain('release-preflight.ts')
+  })
+
+  it('assembles macOS app bundles on internal temporary storage and returns one ZIP artifact', () => {
+    expect(packageDesktop).toContain("mkdtempSync(join(tmpdir(), 'deepseeker-package.')")
+    expect(packageDesktop).toContain('`--config.directories.output=${builderOutput}`')
+    expect(packageDesktop).toContain("'-c', '-k', '--norsrc', '--keepParent'")
+    expect(packageDesktop).toContain("'--keepParent', appPath, temporaryArchive")
+    expect(packageDesktop).toContain("run('unzip', ['-tq', temporaryArchive]")
+    expect(packageDesktop).toContain('copyFileSync(temporaryArchive, artifactPath)')
   })
 
   it('makes the macOS DMG path signed, hardened, and notarized', () => {

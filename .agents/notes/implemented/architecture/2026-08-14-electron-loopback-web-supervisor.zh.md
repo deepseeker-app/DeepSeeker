@@ -12,15 +12,15 @@ Status: implemented
 
 ## 决策
 
-`apps/desktop` 中的 `@deepseek-ai/dsh-desktop` 是私有 Electron 应用和可替换的 supervisor，并非新的 Harness 组合或协议载体。它启动一个绑定到 loopback、使用操作系统分配端口的 `dsh --profile web` 子进程，再从子进程的 `dsh web: <url>` 就绪行加载规范 URL。就绪解析器按流分片而非 stdout 回调边界处理输入，忽略无关输出和可选 LAN 注释，并且只接受端口有效且非零的 HTTP loopback authority。就绪行格式错误、启动错误、子进程提前退出，或流在就绪前结束时，应用会让启动失败，而不会导航到推断出的地址。
+`apps/desktop` 中的 `@deepseek-ai/dsh-desktop` 是 DeepSeeker 的私有 Electron 应用和可替换 supervisor，并非新的 Harness 组合或协议载体。产品名为 `DeepSeeker`，bundle identifier 为 `com.deepseeker.desktop`；内部 `@deepseek-ai` 包名保持不变。它启动一个绑定到 loopback、使用操作系统分配端口的 `dsh --profile web` 子进程，再从子进程的 `dsh web: <url>` 就绪行加载规范 URL。就绪解析器按流分片而非 stdout 回调边界处理输入，忽略无关输出和可选 LAN 注释，并且只接受端口有效且非零的 HTTP loopback authority。就绪行格式错误、启动错误、子进程提前退出，或流在就绪前结束时，应用会让启动失败，而不会导航到推断出的地址。
 
 根目录的 `dev:desktop` 命令是完整的源码启动入口。Electron 启动前，该命令会构建 Host 与客户端包的编译面、Web 前端和 Electron main 进程，因此完成全新依赖安装后无需另行构建仓库。
 
-根目录的 `package:desktop` 命令是完整的本地打包入口。它会执行同样的仓库构建，然后由 `apps/desktop/scripts/stage-runtime.ts` 根据仅含依赖的 manifest，创建已忽略的 `apps/desktop/runtime-host` 目录树。该暂存器运行仅生产环境依赖的提升式 `pnpm deploy`，补回 legacy deploy 遗漏的直接依赖，将包链接实体化，并拒绝所有残留的符号链接。Electron Builder 会把该封闭目录树与构建后的 Web 前端一起复制到应用的 `resources/host` 目录。
+根目录的 `package:desktop` 命令是完整的本地打包入口。它会执行同样的仓库构建，然后由 `apps/desktop/scripts/stage-runtime.ts` 根据仅含依赖的 manifest，创建已忽略的 `apps/desktop/runtime-host` 目录树。该暂存器运行仅生产环境依赖的提升式 `pnpm deploy`，补回 legacy deploy 遗漏的直接依赖，将包链接实体化，并拒绝所有残留的符号链接。Electron Builder 会把该封闭目录树与构建后的 Web 前端一起复制到应用的 `resources/host` 目录。在 macOS 上，`package-desktop.ts` 会在系统临时目录组装应用，校验不含 resource fork 的 ZIP，并只把 `DeepSeeker-mac-<arch>.zip` 复制到 `apps/desktop/dist`；外置工作区磁盘产生的 AppleDouble 文件因此不会被误认为 `app.asar`。
 
 打包后的 supervisor 使用已打包的 Electron 可执行文件和 `ELECTRON_RUN_AS_NODE=1` 启动 `resources/host/node_modules/@deepseek-ai/dsh/lib/bin.js`；源码启动仍使用宿主 `node` 命令与工作区 CLI 入口。Electron 的 Node 模式可以提供独立 Host 进程，无需在应用中增加第二个 Node 可执行文件。因此，已交付 Electron 的 Node ABI 拥有暂存依赖闭包中原生依赖的兼容性。
 
-macOS 和 Windows 使用同一个受跟踪的 `apps/desktop/build/icon.png` 输入，仓库不转换该文件。本地 `package:desktop` 生成未封装产物，不要求发布凭据。独立的 `dist:mac:desktop` 入口启用 hardened runtime，强制签名，并在创建 DMG 前要求一组完整的 Electron Builder 公证凭据。签名既可使用包含 `Developer ID Application` 证书及私钥的持久 Keychain 身份，也可使用由 Electron Builder 导入临时 Keychain 的 Base64 PKCS#12 凭据。发布 wrapper 不会把签名与公证变量传给仓库构建和运行时暂存，只会将其传给 Electron Builder。预检查会在仓库构建前拒绝非 macOS 宿主、已禁用的身份发现、非 Developer ID 身份，以及缺失或不完整的凭据。公证凭据可来自 `notarytool` Keychain profile、完整的 Apple ID 凭据组或 App Store Connect API 密钥凭据组。
+macOS 和 Windows 使用同一个受跟踪的 `apps/desktop/build/icon.png` 输入，仓库不转换该文件。本地 `package:desktop` 在 macOS 上生成未签名 ZIP，不要求发布凭据。独立的 `dist:mac:desktop` 入口启用 hardened runtime，强制签名，并在创建 DMG 前要求一组完整的 Electron Builder 公证凭据。签名既可使用包含 `Developer ID Application` 证书及私钥的持久 Keychain 身份，也可使用由 Electron Builder 导入临时 Keychain 的 Base64 PKCS#12 凭据。发布 wrapper 不会把签名与公证变量传给仓库构建和运行时暂存，只会将其传给 Electron Builder。预检查会在仓库构建前拒绝非 macOS 宿主、已禁用的身份发现、非 Developer ID 身份，以及缺失或不完整的凭据。公证凭据可来自 `notarytool` Keychain profile、完整的 Apple ID 凭据组或 App Store Connect API 密钥凭据组。
 
 该子进程仍然独家拥有 Web profile 的 Cordis 树、会话、设置、凭据、文件系统和 shell 服务、HTTP/WebSocket 载体，以及等待完全停稳的 dispose。Electron 不会把这些服务导入 main 进程或渲染器进程。BrowserWindow 加载经过校验的 loopback URL，禁用 Node 集成，启用上下文隔离和渲染器沙箱，并且不提供 preload 能力。这仍然是既有的本地 Web 安全模型：桌面壳不会增加身份验证层或 IPC 授权层。
 
@@ -42,7 +42,7 @@ Electron 会在经过校验的 Host URL 上附加一个白名单内的平台值�
 
 ## 验证
 
-`apps/desktop/tests/host-supervisor.spec.ts` 固定就绪解析在任意 stdout 分片和末行无换行时的行为，拒绝无效 scheme、host、port 和缺失的就绪信息，并覆盖单个在途启动、启动失败、提前退出、幂等关闭、协作式 `SIGTERM` 结算，以及只执行一次的超时升级。`apps/desktop/tests/window-lifecycle.spec.ts` 固定关闭窗口即隐藏、窗口创建合流、退出期间拒绝恢复窗口，以及 Electron 重试退出前只 dispose 一次 Host。客户端测试固定白名单内的挂载前桌面标记、macOS 90px 收起几何、Web／Windows／Linux 56px 几何、保持不变的 60px logo 行、平台专属侧栏偏移和拖拽条、不透明工作列、Windows 窗口按钮行留位、常驻中心拖拽区、标题栏交互排除、模态框存续期间暂停拖拽、原生玻璃渐变抑制、键盘焦点可见性和浏览器回退。源代码检查与评审固定 Electron 事件接线、单实例恢复、精确 origin 导航策略、加固后的 BrowserWindow 设置、Windows 标准边框和平台材质选择。打包测试固定共用源图标、完整构建与运行时暂存命令、打包后的 Host 路径、Electron Node 模式环境、封闭暂存声明、加固的 macOS 配置、快速失败的发布预检查，以及在签名前拒绝缺失 Host 入口的产物。2026-08-14，arm64 发布路径生成了经过 Developer ID 签名、启用 hardened runtime、完成公证并装订票据的 DMG；挂载后的应用通过严格代码签名验证与 Gatekeeper 评估，其内置 Host 在干净退出前成功报告回环就绪并提供 HTTP 200 响应。
+`apps/desktop/tests/host-supervisor.spec.ts` 固定就绪解析在任意 stdout 分片和末行无换行时的行为，拒绝无效 scheme、host、port 和缺失的就绪信息，并覆盖单个在途启动、启动失败、提前退出、幂等关闭、协作式 `SIGTERM` 结算，以及只执行一次的超时升级。`apps/desktop/tests/window-lifecycle.spec.ts` 固定关闭窗口即隐藏、窗口创建合流、退出期间拒绝恢复窗口，以及 Electron 重试退出前只 dispose 一次 Host。客户端测试固定白名单内的挂载前桌面标记、macOS 90px 收起几何、Web／Windows／Linux 56px 几何、保持不变的 60px logo 行、平台专属侧栏偏移和拖拽条、不透明工作列、Windows 窗口按钮行留位、常驻中心拖拽区、标题栏交互排除、模态框存续期间暂停拖拽、原生玻璃渐变抑制、键盘焦点可见性和浏览器回退。源代码检查与评审固定 Electron 事件接线、单实例恢复、精确 origin 导航策略、加固后的 BrowserWindow 设置、Windows 标准边框和平台材质选择。打包测试固定产品身份、共用源图标、完整构建与运行时暂存命令、打包后的 Host 路径、Electron Node 模式环境、封闭暂存声明、内置临时输出、干净 ZIP 交付、加固的 macOS 配置、快速失败的发布预检查，以及在签名前拒绝缺失 Host 入口的产物。未签名 arm64 ZIP 可使用隔离 Harness home 启动，能报告回环就绪、显示 DeepSeeker 欢迎页与密钥设置页，且不含 AppleDouble 条目。2026-08-14，签名发布路径还生成了经过 Developer ID 签名、启用 hardened runtime、完成公证并装订票据的 DMG；挂载后的应用通过严格代码签名验证与 Gatekeeper 评估。
 
 ## 考虑过的替代方案
 

@@ -1,4 +1,4 @@
-# DeepSeek Harness Desktop
+# DeepSeeker Desktop
 
 English | [中文](README.zh.md)
 
@@ -20,13 +20,13 @@ Native chrome follows the host platform. macOS uses a frameless inset title bar,
 
 ## Packaging
 
-The local packaging command performs the complete repository build, stages the Host's closed production dependency tree, and creates an unpacked application for the current platform. A separate manual build is not required:
+The local packaging command performs the complete repository build and stages the Host's closed production dependency tree. On macOS it assembles the unsigned app under system temporary storage, then writes one ZIP to `apps/desktop/dist`; this prevents AppleDouble files from an external volume from corrupting Electron packaging. A separate manual build is not required:
 
 ```sh
 pnpm run package:desktop
 ```
 
-Packaged applications run the staged `@deepseek-ai/dsh` CLI in a separate process through Electron's Node mode. The application therefore retains the supervised-Host lifecycle without shipping a second Node executable. An `afterPack` check rejects the package before signing when the staged CLI entry or Web frontend entry is absent. Both macOS and Windows use the exact tracked `apps/desktop/build/icon.png` source; the repository does not preprocess or commit platform-specific icon variants.
+The app inside the ZIP runs the staged `@deepseek-ai/dsh` CLI in a separate process through Electron's Node mode. It therefore retains the supervised-Host lifecycle without shipping a second Node executable. An `afterPack` check rejects the package before compression when the staged CLI entry or Web frontend entry is absent. Both macOS and Windows use the exact tracked `apps/desktop/build/icon.png` source; the repository does not preprocess or commit platform-specific icon variants.
 
 ### Signed macOS DMG
 
@@ -58,7 +58,7 @@ After a successful build, mount the generated DMG and verify the installed appli
 DMG_PATH="$(find apps/desktop/dist -maxdepth 1 -type f -name '*.dmg' -print -quit)"
 MOUNT_POINT="$(mktemp -d)"
 hdiutil attach "$DMG_PATH" -mountpoint "$MOUNT_POINT" -nobrowse -readonly
-APP_PATH="$MOUNT_POINT/DeepSeek Harness.app"
+APP_PATH="$MOUNT_POINT/DeepSeeker.app"
 codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 spctl --assess --type execute --verbose=4 "$APP_PATH"
 xcrun stapler validate "$APP_PATH"

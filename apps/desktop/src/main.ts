@@ -18,7 +18,7 @@ import {
 import { createHostSupervisor, spawnDshWeb, type HostSupervisor } from './host-supervisor.ts'
 import { createDesktopLifecycle, type DesktopLifecycle } from './window-lifecycle.ts'
 
-const APP_NAME = 'DeepSeek Harness'
+const APP_NAME = 'DeepSeeker'
 const WINDOW_WIDTH = 1440
 const WINDOW_HEIGHT = 920
 const DESKTOP_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..')

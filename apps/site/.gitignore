@@ -1,0 +1,6 @@
+.npm-cache/
+.vite/
+dist/
+node_modules/
+qa/
+._*

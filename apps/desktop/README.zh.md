@@ -1,4 +1,4 @@
-# DeepSeek Harness 桌面端
+# DeepSeeker 桌面端
 
 [English](README.md) | 中文
 
@@ -20,13 +20,13 @@ pnpm run dev:desktop
 
 ## 打包
 
-本地打包命令会执行完整的仓库构建，为 Host 暂存封闭的生产依赖树，并为当前平台生成未封装应用。无需另行手动构建：
+本地打包命令会执行完整的仓库构建，并为 Host 暂存封闭的生产依赖树。macOS 会先在系统临时目录生成未签名应用，再把 ZIP 放进 `apps/desktop/dist`，避免外置硬盘产生的 AppleDouble 文件破坏 Electron 打包。无需另行手动构建：
 
 ```sh
 pnpm run package:desktop
 ```
 
-打包后的应用通过 Electron 的 Node 模式，在独立进程内运行已暂存的 `@deepseek-ai/dsh` CLI。应用因此保留受 supervisor 管理的 Host 生命周期，无需携带第二个 Node 可执行文件。如果暂存的 CLI 入口或 Web 前端入口缺失，`afterPack` 检查会在签名前拒绝该产物。macOS 和 Windows 都使用受跟踪的 `apps/desktop/build/icon.png` 原始文件；仓库不预处理图标，也不提交平台专用图标变体。
+ZIP 里的应用通过 Electron 的 Node 模式，在独立进程内运行已暂存的 `@deepseek-ai/dsh` CLI。应用因此保留受 supervisor 管理的 Host 生命周期，无需携带第二个 Node 可执行文件。如果暂存的 CLI 入口或 Web 前端入口缺失，`afterPack` 检查会在压缩前拒绝该产物。macOS 和 Windows 都使用受跟踪的 `apps/desktop/build/icon.png` 原始文件；仓库不预处理图标，也不提交平台专用图标变体。
 
 ### 已签名的 macOS DMG
 
@@ -58,7 +58,7 @@ Electron Builder 会把该 Base64 PKCS#12 证书导入临时 Keychain，并在�
 DMG_PATH="$(find apps/desktop/dist -maxdepth 1 -type f -name '*.dmg' -print -quit)"
 MOUNT_POINT="$(mktemp -d)"
 hdiutil attach "$DMG_PATH" -mountpoint "$MOUNT_POINT" -nobrowse -readonly
-APP_PATH="$MOUNT_POINT/DeepSeek Harness.app"
+APP_PATH="$MOUNT_POINT/DeepSeeker.app"
 codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 spctl --assess --type execute --verbose=4 "$APP_PATH"
 xcrun stapler validate "$APP_PATH"

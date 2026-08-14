@@ -1,6 +1,6 @@
 {
   "name": "@deepseek-ai/dsh-desktop",
-  "description": "DeepSeek Harness desktop application with tray-owned Host lifecycle",
+  "description": "DeepSeeker desktop agent powered by DeepSeek Harness",
   "version": "0.1.0-rc.5",
   "private": true,
   "type": "module",
@@ -9,8 +9,8 @@
     "build": "tsc -p tsconfig.json && tsdown",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tests/tsconfig.json",
     "dev": "pnpm --workspace-root run build && electron .",
-    "package": "pnpm --workspace-root run build && node --import tsx scripts/stage-runtime.ts && electron-builder --dir",
-    "dist": "pnpm --workspace-root run build && node --import tsx scripts/stage-runtime.ts && electron-builder",
+    "package": "pnpm --workspace-root run build && node --import tsx scripts/stage-runtime.ts && node --import tsx scripts/ensure-electron-runtime.ts && node --import tsx scripts/package-desktop.ts",
+    "dist": "pnpm --workspace-root run build && node --import tsx scripts/stage-runtime.ts && node --import tsx scripts/ensure-electron-runtime.ts && electron-builder",
     "dist:mac": "node --import tsx scripts/release-mac.ts"
   },
   "license": "MIT",
@@ -23,8 +23,8 @@
     "vitest": "^4.1.8"
   },
   "build": {
-    "appId": "ai.deepseek.harness.desktop",
-    "productName": "DeepSeek Harness",
+    "appId": "com.deepseeker.desktop",
+    "productName": "DeepSeeker",
     "electronDist": "node_modules/electron/dist",
     "afterPack": "./scripts/verify-packaged-runtime.ts",
     "asar": true,
