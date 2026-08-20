@@ -125,18 +125,18 @@ jobs:
             $runtimeStderr = Join-Path $env:RUNNER_TEMP 'DeepSeeker-electron-node.stderr.txt'
             Remove-Item @($runtimeStdout, $runtimeStderr) -Force -ErrorAction SilentlyContinue
             $runtime = Start-Process -FilePath $executable `
-              -ArgumentList @('-e', "process.stdout.write(process.versions.electron ?? '')") `
+              -ArgumentList @('-e', "process.stdout.write(process.versions.electron??'')") `
               -RedirectStandardOutput $runtimeStdout -RedirectStandardError $runtimeStderr `
               -Wait -PassThru
             $electronVersion = if (Test-Path $runtimeStdout -PathType Leaf) {
-              (Get-Content $runtimeStdout -Raw).Trim()
+              ([string](Get-Content $runtimeStdout -Raw)).Trim()
             }
             else {
               ''
             }
             if ($runtime.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($electronVersion)) {
               $runtimeError = if (Test-Path $runtimeStderr -PathType Leaf) {
-                (Get-Content $runtimeStderr -Raw).Trim()
+                ([string](Get-Content $runtimeStderr -Raw)).Trim()
               }
               else {
                 ''
