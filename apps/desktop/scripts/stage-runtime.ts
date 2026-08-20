@@ -32,7 +32,7 @@ export function packageManagerInvocation(
 ): PackageManagerInvocation {
   if (platform !== 'win32') return { command: 'pnpm', args }
   return {
-    command: commandProcessor ?? 'cmd.exe',
+    command: commandProcessor || 'cmd.exe',
     args: ['/d', '/s', '/c', 'pnpm.cmd', ...args],
   }
 }

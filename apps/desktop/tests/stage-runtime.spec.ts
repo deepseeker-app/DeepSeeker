@@ -18,7 +18,7 @@ describe('desktop runtime staging', () => {
       command: 'C:\\Windows\\System32\\cmd.exe',
       args: ['/d', '/s', '/c', 'pnpm.cmd', 'install', '--frozen-lockfile'],
     })
-    expect(packageManagerInvocation(['deploy'], 'win32', undefined)).toEqual({
+    expect(packageManagerInvocation(['deploy'], 'win32', '')).toEqual({
       command: 'cmd.exe',
       args: ['/d', '/s', '/c', 'pnpm.cmd', 'deploy'],
     })
