@@ -208,6 +208,8 @@ describe('desktop packaging configuration', () => {
     expect(windowsReleaseWorkflow).toContain("throw 'Installer does not have a Windows PE signature'")
     expect(windowsReleaseWorkflow).toContain("Start-Process -FilePath $installer -ArgumentList @('/S', \"/D=$installDir\") -Wait -PassThru")
     expect(windowsReleaseWorkflow).toContain("$env:ELECTRON_RUN_AS_NODE = '1'")
+    expect(windowsReleaseWorkflow).toContain('-RedirectStandardOutput $runtimeStdout -RedirectStandardError $runtimeStderr')
+    expect(windowsReleaseWorkflow).not.toContain('$electronVersion = & $executable')
     expect(windowsReleaseWorkflow).toContain("Get-ChildItem $installDir -Filter 'Uninstall*.exe'")
     expect(windowsReleaseWorkflow).toContain("throw 'Silent uninstall left the installed application executable behind'")
     expect(windowsReleaseWorkflow).toContain('uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4')

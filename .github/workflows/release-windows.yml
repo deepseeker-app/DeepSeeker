@@ -121,9 +121,27 @@ jobs:
           $priorRunAsNode = $env:ELECTRON_RUN_AS_NODE
           try {
             $env:ELECTRON_RUN_AS_NODE = '1'
-            $electronVersion = & $executable -e "process.stdout.write(process.versions.electron ?? '')"
-            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($electronVersion)) {
-              throw 'Installed Electron runtime did not start in Node mode'
+            $runtimeStdout = Join-Path $env:RUNNER_TEMP 'DeepSeeker-electron-node.stdout.txt'
+            $runtimeStderr = Join-Path $env:RUNNER_TEMP 'DeepSeeker-electron-node.stderr.txt'
+            Remove-Item @($runtimeStdout, $runtimeStderr) -Force -ErrorAction SilentlyContinue
+            $runtime = Start-Process -FilePath $executable `
+              -ArgumentList @('-e', "process.stdout.write(process.versions.electron ?? '')") `
+              -RedirectStandardOutput $runtimeStdout -RedirectStandardError $runtimeStderr `
+              -Wait -PassThru
+            $electronVersion = if (Test-Path $runtimeStdout -PathType Leaf) {
+              (Get-Content $runtimeStdout -Raw).Trim()
+            }
+            else {
+              ''
+            }
+            if ($runtime.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($electronVersion)) {
+              $runtimeError = if (Test-Path $runtimeStderr -PathType Leaf) {
+                (Get-Content $runtimeStderr -Raw).Trim()
+              }
+              else {
+                ''
+              }
+              throw "Installed Electron runtime did not start in Node mode (exit $($runtime.ExitCode)): $runtimeError"
             }
           }
           finally {
