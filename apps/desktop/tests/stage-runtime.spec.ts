@@ -4,7 +4,7 @@ import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { materializeLinks, removeAppleDouble } from '../scripts/stage-runtime.ts'
+import { materializeLinks, packageManagerInvocation, removeAppleDouble } from '../scripts/stage-runtime.ts'
 
 const fixtures: string[] = []
 
@@ -13,6 +13,21 @@ afterEach(async () => {
 })
 
 describe('desktop runtime staging', () => {
+  it('runs pnpm through the Windows command processor', () => {
+    expect(packageManagerInvocation(['install', '--frozen-lockfile'], 'win32', 'C:\\Windows\\System32\\cmd.exe')).toEqual({
+      command: 'C:\\Windows\\System32\\cmd.exe',
+      args: ['/d', '/s', '/c', 'pnpm.cmd', 'install', '--frozen-lockfile'],
+    })
+    expect(packageManagerInvocation(['deploy'], 'win32', undefined)).toEqual({
+      command: 'cmd.exe',
+      args: ['/d', '/s', '/c', 'pnpm.cmd', 'deploy'],
+    })
+  })
+
+  it.each(['darwin', 'linux'] as const)('spawns pnpm directly on %s', (platform) => {
+    expect(packageManagerInvocation(['install'], platform)).toEqual({ command: 'pnpm', args: ['install'] })
+  })
+
   it('materializes a directory link without deleting or modifying its target', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-stage-runtime-'))
     fixtures.push(root)

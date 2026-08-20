@@ -19,6 +19,24 @@ interface Manifest {
   readonly dependencies?: Readonly<Record<string, string>>
 }
 
+export interface PackageManagerInvocation {
+  readonly command: string
+  readonly args: readonly string[]
+}
+
+/** Build a pnpm invocation that does not ask Node to spawn a Windows command shim directly. */
+export function packageManagerInvocation(
+  args: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+  commandProcessor: string | undefined = process.env.ComSpec,
+): PackageManagerInvocation {
+  if (platform !== 'win32') return { command: 'pnpm', args }
+  return {
+    command: commandProcessor ?? 'cmd.exe',
+    args: ['/d', '/s', '/c', 'pnpm.cmd', ...args],
+  }
+}
+
 async function run(command: string, args: readonly string[]): Promise<void> {
   await new Promise<void>((accept, reject) => {
     const child = spawn(command, args, { cwd: repositoryRoot, env: { ...process.env, CI: 'true' }, stdio: 'inherit' })
@@ -28,6 +46,11 @@ async function run(command: string, args: readonly string[]): Promise<void> {
       else reject(new Error(`desktop runtime staging failed (${code === null ? `signal ${String(signal)}` : `exit ${String(code)}`}): ${command} ${args.join(' ')}`))
     })
   })
+}
+
+async function runPackageManager(args: readonly string[]): Promise<void> {
+  const invocation = packageManagerInvocation(args)
+  await run(invocation.command, invocation.args)
 }
 
 async function manifest(path: string): Promise<Manifest> {
@@ -105,10 +128,9 @@ async function restoreLegacyHoists(): Promise<void> {
 
 async function deploy(): Promise<void> {
   const savedWorkspaceState = existsSync(workspaceState) ? await readFile(workspaceState) : undefined
-  const packageManager = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
   const failures: unknown[] = []
   try {
-    await run(packageManager, [
+    await runPackageManager([
       '--config.verify-deps-before-run=false', '--config.allow-unused-patches=true',
       '--filter', deployPackage, 'deploy', '--legacy', '--prod',
       '--config.node-linker=hoisted', '--config.auto-install-peers=false', '--config.link-workspace-packages=true', staging,
@@ -124,7 +146,7 @@ async function deploy(): Promise<void> {
   }
   try {
     // Legacy deploy temporarily rewrites the active hoist layout; relink every source importer before returning.
-    await run(packageManager, ['install', '--frozen-lockfile'])
+    await runPackageManager(['install', '--frozen-lockfile'])
   } catch (cause) {
     failures.push(cause)
   }
