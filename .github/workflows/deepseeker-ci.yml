@@ -43,19 +43,21 @@ jobs:
 
       - name: Reject local patch residue
         run: |
-          git ls-files | rg '(^|/)\._|(^|/)dist/|^\.patch-work/'
-          if ($LASTEXITCODE -eq 0) {
+          $trackedPaths = @(git ls-files)
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Failed to list tracked paths'
+          }
+          $trackedResidue = @($trackedPaths | Select-String -Pattern '(^|/)\._|(^|/)dist/|^\.patch-work/')
+          if ($trackedResidue.Count -gt 0) {
+            $trackedResidue | ForEach-Object { Write-Error "Tracked residue: $($_.Line)" }
             exit 1
           }
-          if ($LASTEXITCODE -ne 1) {
-            throw 'Failed to scan tracked paths'
-          }
-          rg -n '/(Volumes|Users|private|var/folders)/|\.pnpm_patches|^old mode |^new mode ' patches --glob '@linxin666__*.patch'
-          if ($LASTEXITCODE -eq 0) {
+
+          $patchFiles = @(Get-ChildItem -Path patches -Filter '@linxin666__*.patch' -File -ErrorAction Stop)
+          $patchResidue = @($patchFiles | Select-String -Pattern '/(Volumes|Users|private|var/folders)/|\.pnpm_patches|^old mode |^new mode ')
+          if ($patchResidue.Count -gt 0) {
+            $patchResidue | ForEach-Object { Write-Error "Patch residue: $($_.Path):$($_.LineNumber):$($_.Line)" }
             exit 1
-          }
-          if ($LASTEXITCODE -ne 1) {
-            throw 'Failed to scan dependency patches'
           }
 
       - name: Run static repository gates
