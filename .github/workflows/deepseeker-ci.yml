@@ -41,6 +41,9 @@ jobs:
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install Playwright Chromium
+        run: pnpm --filter @deepseek-ai/dsh-web-frontend exec playwright install chromium
+
       - name: Reject local patch residue
         run: |
           $trackedPaths = @(git ls-files)
