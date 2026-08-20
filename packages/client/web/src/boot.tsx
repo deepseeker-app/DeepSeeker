@@ -41,14 +41,58 @@ import {
   type BootManifest, type ClientModuleSystemOptions, type DshWindow,
 } from '@deepseek-ai/dsh-client-modules/client'
 import * as AppShell from './app-shell.ts'
-import { APP_SHELL_ID } from './app-shell.ts'
+import { APP_SHELL_ID, type AppShellService } from './app-shell.ts'
 import { AppRoot } from './AppRoot.tsx'
 import { getStaticModules } from './seed.ts'
 import { STATE_LABELS, createLoaderStatusStore, createSignal } from './loader-status.ts'
 import './base.css'
 
-/** Module transport hook the shell passes through (jsdom tests replace the <script> path). */
-export type BootSeams = Pick<ClientModuleSystemOptions, 'loadBundle'>
+/** Browser-location face used by the legacy pair-link redirect. */
+export interface BootLocation {
+  /** Current absolute page URL. */
+  href: string
+  /** Navigate without retaining the unpaired desktop page in history. */
+  replace(url: string): void
+}
+
+/** Module transport and location hooks used by browser tests. */
+export interface BootSeams extends Pick<ClientModuleSystemOptions, 'loadBundle'> {
+  /** Optional location override for the pre-plugin pair redirect. */
+  location?: BootLocation
+  /** Test-only override for the local plugin activation deadline. */
+  pluginBootTimeoutMs?: number
+}
+
+const DEFAULT_PLUGIN_BOOT_TIMEOUT_MS = 15_000
+
+/** Bound plugin activation so one pending fiber cannot leave the shell spinning forever. */
+export async function waitForPluginBoot(
+  task: Promise<void>,
+  timeoutMs: number,
+  timeoutError: () => Error,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => { reject(timeoutError()) }, timeoutMs)
+  })
+  try {
+    await Promise.race([task, deadline])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
+/**
+ * Convert an old root pair link into the standalone mobile entry before the
+ * desktop manifest or connection plugins start. New QR codes already target
+ * `/m`; this keeps previously issued links from entering the desktop boot.
+ */
+export function legacyMobilePairRedirect(href: string): string | undefined {
+  const url = new URL(href)
+  if (url.pathname !== '/' || !url.searchParams.has('pair')) return undefined
+  url.pathname = '/m'
+  return `${url.pathname}${url.search}${url.hash}`
+}
 
 /**
  * The modules package's own graph row id. The kernel adopts that entry
@@ -71,6 +115,7 @@ export class AppWebEntry {
   private readonly status = createLoaderStatusStore()
   private readonly settled = createSignal(false)
   private readonly error = createSignal<string | undefined>(undefined)
+  private readonly appShell = createSignal<AppShellService | undefined>(undefined)
   // Assigned by run() before any private method or settled-gated closure reads them.
   private ctx!: Context
   private modules!: ClientModuleSystem
@@ -95,10 +140,20 @@ export class AppWebEntry {
    * @returns resolves once the UI settled or the failure report rendered.
    */
   async run(): Promise<void> {
+    const location = this.seams?.location ?? window.location
+    const redirect = legacyMobilePairRedirect(location.href)
+    if (redirect !== undefined) {
+      location.replace(redirect)
+      return
+    }
+
     this.manifest = parseBootManifest((globalThis as DshWindow).__DSH_BOOT__)
 
+    const moduleSeams = this.seams?.loadBundle === undefined
+      ? {}
+      : { loadBundle: this.seams.loadBundle }
     this.modules = new ClientModuleSystem({
-      modules: this.manifest.modules, staticModules: getStaticModules(), ...this.seams,
+      modules: this.manifest.modules, staticModules: getStaticModules(), ...moduleSeams,
     })
     // The app-shell assembly is the only shell-own module: every other graph
     // row is a plugin bundle arriving through fetch.
@@ -117,12 +172,7 @@ export class AppWebEntry {
         settled={this.settled}
         status={this.status}
         error={this.error}
-        renderApp={() => {
-          const shell = this.ctx.get('appShell')
-          // Unreachable after a clean settle (the app-shell entry is in every graph).
-          if (shell === undefined) throw new Error('web boot: appShell service missing after settled')
-          return shell.renderApp()
-        }}
+        appShell={this.appShell}
       />,
     )
 
@@ -134,6 +184,11 @@ export class AppWebEntry {
     this.ctx = new Context()
     try {
       await this.runPluginBoot(prefetching)
+      const appShell = this.ctx.get('appShell')
+      if (appShell === undefined) {
+        throw new Error('web boot: appShell service missing after settled')
+      }
+      this.appShell.set(appShell)
       this.settled.set(true)
     } catch (reason) {
       // Stay on the loading page; surface the sweep report (fail loud).
@@ -175,6 +230,10 @@ export class AppWebEntry {
       if (entry === undefined || entry.fiber === undefined) return
       this.status.set(entry.options.name, STATE_LABELS[entry.fiber.state])
     })
+    ctx.on('internal/service', (service, value) => {
+      if (service !== 'appShell') return
+      this.appShell.set(value as AppShellService | undefined)
+    })
 
     // Barrier before any entry exists: entry creation materializes bundles,
     // and materialization runs synchronous cross-package require edges that
@@ -193,18 +252,34 @@ export class AppWebEntry {
     // kernel: it is shell-own code (host graph rows are all plugin bundles),
     // and mounting the assembly is not a composition decision — it rides the
     // same entry lifecycle so the sweep and status cover it uniformly.
-    await Promise.all(rows.map(async (name) => {
-      this.status.set(name, 'loading')
-      const id = await loader.create({ name })
-      // A failed import leaves the entry fiberless (Entry._init logs and
-      // returns); project it as failed — no fiber means no status event.
-      if (loader.resolve(id).fiber === undefined) {
-        this.status.set(name, 'failed')
-      }
-    }))
-
-    await loader.await()
+    const activation = (async () => {
+      await Promise.all(rows.map(async (name) => {
+        this.status.set(name, 'loading')
+        const id = await loader.create({ name })
+        // A failed import leaves the entry fiberless (Entry._init logs and
+        // returns); project it as failed — no fiber means no status event.
+        if (loader.resolve(id).fiber === undefined) {
+          this.status.set(name, 'failed')
+        }
+      }))
+      await loader.await()
+    })()
+    await waitForPluginBoot(
+      activation,
+      this.seams?.pluginBootTimeoutMs ?? DEFAULT_PLUGIN_BOOT_TIMEOUT_MS,
+      () => this.pluginBootTimeoutError(),
+    )
     this.assertEntriesActive()
+  }
+
+  /** Build the same fiber sweep report used after settlement while activation is still pending. */
+  private pluginBootTimeoutError(): Error {
+    try {
+      this.assertEntriesActive()
+    } catch (reason) {
+      return reason instanceof Error ? reason : new Error(String(reason))
+    }
+    return new Error('web boot: plugin activation timed out')
   }
 
   /**
@@ -219,7 +294,9 @@ export class AppWebEntry {
     for (const entry of ctx.loader.entries()) {
       const name = entry.options.name
       if (entry.fiber === undefined) {
-        failures.push(`${name}: import failed (see console for the import error)`)
+        failures.push(entry._initTask === undefined
+          ? `${name}: import failed (see console for the import error)`
+          : `${name}: loading (import or startup still in progress)`)
         continue
       }
       const state = STATE_LABELS[entry.fiber.state]

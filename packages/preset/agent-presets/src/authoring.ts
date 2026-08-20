@@ -16,6 +16,7 @@ import { chmod, cp, readdir, readFile, rm, stat } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { expandHomePath } from '@deepseek-ai/dsh-home-paths'
+import { COMPOSITION_FILE } from './discovery.ts'
 import { METADATA_FILE, renderPresetMetadata } from './metadata.ts'
 import { PRESET_ID, type AgentPreset, type PresetRoot } from './preset.ts'
 
@@ -105,8 +106,12 @@ async function tightenModes(dir: string): Promise<void> {
     if (entry.isDirectory()) {
       await tightenModes(target)
     } else {
+      const isConfigOrDocument = entry.name === COMPOSITION_FILE
+        || entry.name === METADATA_FILE
+        || entry.name === 'SKILL.md'
+        || /^README(?:\..+)?$/i.test(entry.name)
       /* v8 ignore next -- Windows exposes no POSIX owner-execute bit; the POSIX lane covers both file modes. */
-      await chmod(target, ((await stat(target)).mode & 0o100) === 0 ? 0o600 : 0o700)
+      await chmod(target, !isConfigOrDocument && ((await stat(target)).mode & 0o100) !== 0 ? 0o700 : 0o600)
     }
   }
 }

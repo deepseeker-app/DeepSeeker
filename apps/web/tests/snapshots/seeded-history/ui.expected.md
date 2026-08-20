@@ -43,6 +43,7 @@
   - img
   - img
   - text: Context injection AGENTS.md
+- button "插入图片引用，交给 describe_image 工具分析"
 - textbox "Message the agent"
 - button "Commands":
   - img
@@ -51,4 +52,4 @@
   - text: DeepSeek-V4-Flash
   - img
 - button "Send message" [disabled]
-- text: 1 turns · 2 steps LLM {{duration}} · Tool call {{duration}} TTFT avg {{duration}} · {{throughput}} tok/s Cache hit 98% Input 15.8K tok · Output 135 tok
+- text: 1 turns · 2 steps LLM {{duration}} · Tool call {{duration}} TTFT avg {{duration}} · {{throughput}} tok/s Cache hit 98% Input 15.8K tok · Output 135 tok TPS {{throughput}} tok/s

@@ -72,7 +72,14 @@ export function PluginCard(props: PluginCardProps) {
             {!state.writable ? <p className={css.readOnly} role="status">{props.t('readOnly')}</p> : null}
             {props.children}
             <div className={css.footer}>
-              {state.failed ? <p className={css.failed} role="status">{props.t('saveFailed')}</p> : null}
+              {state.failed
+                ? (
+                  <p className={css.failed} role="status">
+                    {props.t('saveFailed')}
+                    {state.error === null ? null : ` ${props.t(state.error)}`}
+                  </p>
+                )
+                : null}
               <button
                 type="button"
                 className={css.discard}

@@ -16,7 +16,7 @@ Status: implemented
 
 根目录的 `dev:desktop` 命令是完整的源码启动入口。Electron 启动前，该命令会构建 Host 与客户端包的编译面、Web 前端和 Electron main 进程，因此完成全新依赖安装后无需另行构建仓库。
 
-根目录的 `package:desktop` 命令是完整的本地打包入口。它会执行同样的仓库构建，然后由 `apps/desktop/scripts/stage-runtime.ts` 根据仅含依赖的 manifest，创建已忽略的 `apps/desktop/runtime-host` 目录树。该暂存器运行仅生产环境依赖的提升式 `pnpm deploy`，补回 legacy deploy 遗漏的直接依赖，将包链接实体化，并拒绝所有残留的符号链接。Electron Builder 会把该封闭目录树与构建后的 Web 前端一起复制到应用的 `resources/host` 目录。在 macOS 上，`package-desktop.ts` 会在系统临时目录组装应用，校验不含 resource fork 的 ZIP，并只把 `DeepSeeker-mac-<arch>.zip` 复制到 `apps/desktop/dist`；外置工作区磁盘产生的 AppleDouble 文件因此不会被误认为 `app.asar`。
+根目录的 `package:desktop` 命令是完整的本地打包入口。它会执行同样的仓库构建，然后由 `apps/desktop/scripts/stage-runtime.ts` 根据仅含依赖的 manifest，创建已忽略的 `apps/desktop/runtime-host` 目录树。该暂存器运行仅生产环境依赖的提升式 `pnpm deploy`，补回 legacy deploy 遗漏的直接依赖，将包链接实体化，删除从外置盘工作区复制过来的所有 `._*` AppleDouble sidecar，并拒绝所有残留的符号链接。Electron Builder 会把该封闭目录树与构建后的 Web 前端一起复制到应用的 `resources/host` 目录。在 macOS 上，`package-desktop.ts` 会在系统临时目录组装应用，校验不含 resource fork 的 ZIP，并只把 `DeepSeeker-mac-<arch>.zip` 复制到 `apps/desktop/dist`；外置工作区磁盘产生的 AppleDouble 文件因此不会被误认为 `app.asar`。
 
 打包后的 supervisor 使用已打包的 Electron 可执行文件和 `ELECTRON_RUN_AS_NODE=1` 启动 `resources/host/node_modules/@deepseek-ai/dsh/lib/bin.js`；源码启动仍使用宿主 `node` 命令与工作区 CLI 入口。Electron 的 Node 模式可以提供独立 Host 进程，无需在应用中增加第二个 Node 可执行文件。因此，已交付 Electron 的 Node ABI 拥有暂存依赖闭包中原生依赖的兼容性。
 

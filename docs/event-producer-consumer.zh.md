@@ -74,5 +74,6 @@
 | `internal/plugin` | - | `loader`, [`lsp-stdio`](../packages/lsp/lsp-stdio), `webserver` |
 | `internal/service` | - | [`agent-presets`](../packages/preset/agent-presets), `gateway` |
 | `internal/status` | - | [`agent`](../packages/core/agent) |
+| `remote-web-ui/authorization-changed` | - | `connection` |
 
 维护模式：生成内容。Cordis 事件声明及生产方／监听方的关系边由仓库的 TypeScript Program 解析。

@@ -143,20 +143,43 @@ describe('ui-settings-models apply', () => {
     expect(() => b.locale.register('settings.models', 'en', {})).not.toThrow()
   })
 
-  it('keeps remote-browser acknowledgement in process memory', async () => {
-    const b = await bench(false)
-    declare(b.slots)
-    await b.ctx.plugin({ inject: [...inject], apply }).await()
-    const entry = b.slots.entries('settings.onboarding')
-      .find(candidate => candidate.options.id === 'welcome-notice')!
-    const injected = (
-      entry.inject as unknown as () => import('../src/client/WelcomeNotice.tsx').WelcomeNoticeInjected
-    )()
-
-    await injected.controller.load()
-    expect(injected.controller.store.getSnapshot()).toEqual({
-      status: 'ready', acknowledged: false, error: null,
+  it('keeps remote-browser acknowledgement in browser storage across app contexts', async () => {
+    const values = new Map<string, string>()
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value) },
     })
+    try {
+      const b = await bench(false)
+      declare(b.slots)
+      await b.ctx.plugin({ inject: [...inject], apply }).await()
+      const entry = b.slots.entries('settings.onboarding')
+        .find(candidate => candidate.options.id === 'welcome-notice')!
+      const injected = (
+        entry.inject as unknown as () => import('../src/client/WelcomeNotice.tsx').WelcomeNoticeInjected
+      )()
+
+      await injected.controller.load()
+      expect(injected.controller.store.getSnapshot()).toEqual({
+        status: 'ready', acknowledged: false, error: null,
+      })
+      await expect(injected.controller.acknowledge()).resolves.toBe(true)
+
+      const reloaded = await bench(false)
+      declare(reloaded.slots)
+      await reloaded.ctx.plugin({ inject: [...inject], apply }).await()
+      const reloadedEntry = reloaded.slots.entries('settings.onboarding')
+        .find(candidate => candidate.options.id === 'welcome-notice')!
+      const reloadedInjected = (
+        reloadedEntry.inject as unknown as () => import('../src/client/WelcomeNotice.tsx').WelcomeNoticeInjected
+      )()
+      await reloadedInjected.controller.load()
+      expect(reloadedInjected.controller.store.getSnapshot()).toEqual({
+        status: 'ready', acknowledged: true, error: null,
+      })
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })
 

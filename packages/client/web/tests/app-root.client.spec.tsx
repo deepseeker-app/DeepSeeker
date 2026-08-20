@@ -9,8 +9,12 @@
  */
 import { afterEach, describe, expect, it } from 'vitest'
 import { act, cleanup, render } from '@testing-library/react'
+import type { ReactNode } from 'react'
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  document.documentElement.removeAttribute('data-dsh-app-ready')
+})
 import { AppRoot } from '@deepseek-ai/dsh-client-web/src/AppRoot.tsx'
 import { createLoaderStatusStore, createSignal } from '@deepseek-ai/dsh-client-web/src/loader-status.ts'
 
@@ -19,15 +23,18 @@ function mount() {
   const error = createSignal<string | undefined>(undefined)
   const status = createLoaderStatusStore()
   let renders = 0
+  const appShell = createSignal<{ renderApp: () => ReactNode } | undefined>({
+    renderApp: () => { renders += 1; return <div data-testid="real-ui" /> },
+  })
   const utils = render(
     <AppRoot
       settled={settled}
       status={status}
       error={error}
-      renderApp={() => { renders += 1; return <div data-testid="real-ui" /> }}
+      appShell={appShell}
     />,
   )
-  return { settled, status, error, counts: () => renders, ...utils }
+  return { settled, status, error, appShell, counts: () => renders, ...utils }
 }
 
 describe('AppRoot', () => {
@@ -72,5 +79,32 @@ describe('AppRoot', () => {
     expect(getByTestId('real-ui')).toBeTruthy()
     expect(queryByText('HARNESS')).toBeNull()
     expect(counts()).toBe(1)
+  })
+
+  it('returns to loading while the app shell reloads and renders its replacement', () => {
+    const { settled, appShell, getByText, getByTestId, queryByTestId } = mount()
+    act(() => { settled.set(true) })
+    expect(getByTestId('real-ui')).toBeTruthy()
+
+    act(() => { appShell.set(undefined) })
+    expect(queryByTestId('real-ui')).toBeNull()
+    expect(getByText('HARNESS')).toBeTruthy()
+    expect(document.documentElement.getAttribute('data-dsh-app-ready')).toBeNull()
+
+    act(() => {
+      appShell.set({ renderApp: () => <div data-testid="real-ui" data-reloaded="true" /> })
+    })
+    expect(getByTestId('real-ui').getAttribute('data-reloaded')).toBe('true')
+  })
+
+  it('publishes readiness only after the real UI commits and clears it on unmount', () => {
+    const { settled, unmount } = mount()
+    expect(document.documentElement.getAttribute('data-dsh-app-ready')).toBeNull()
+
+    act(() => { settled.set(true) })
+    expect(document.documentElement.getAttribute('data-dsh-app-ready')).toBe('true')
+
+    unmount()
+    expect(document.documentElement.getAttribute('data-dsh-app-ready')).toBeNull()
   })
 })

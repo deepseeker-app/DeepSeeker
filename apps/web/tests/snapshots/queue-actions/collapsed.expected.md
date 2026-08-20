@@ -19,6 +19,7 @@
 - paragraph: partial
 - status: Deep diving...
 - button "2 queued messages"
+- button "插入图片引用，交给 describe_image 工具分析"
 - textbox "Cmd/Ctrl+Enter steers all queued messages"
 - button "Commands":
   - img

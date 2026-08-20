@@ -1,0 +1,2239 @@
+diff --git a/README.md b/README.md
+index 926132d9851c680b78b7e5af6b8dc7b823b8a4bc..f9a53476b4457543007192b7c3a7a9d4bc773838 100644
+--- a/README.md
++++ b/README.md
+@@ -23,7 +23,10 @@ DeepSeek Harness（DSH）定制的远程 SSH 插件：Host 进程内的持久连
+ 
+ - 所有 `/api/dsh-ssh/*` 路由仅限 loopback 访问（含同源校验）——对远程服务器执行
+   命令的接口不会暴露给局域网。
+-- 密码 / 密钥口令以明文保存在 `~/.dsh/dsh-ssh.json`，文件权限 0600、目录 0700
++- 每个别名第一次连接时记录服务器密钥的 SHA-256 指纹；后续指纹变化会直接拒绝，
++  不会混进三次重连。修改主机地址或端口会清掉旧指纹并重新执行首次信任。
++- 密码 / 密钥口令以明文保存在 `$DSH_HOME/dsh-ssh.json`（未设置时兼容
++  `~/.dsh/dsh-ssh.json`），文件权限 0600、目录 0700
+   （与 ssh-skill 把密码写进 ssh-config 注释同一信任模型）。
+ - 隧道只监听 `127.0.0.1`。
+ - Agent 使用工具前，主机需先在 GUI 中配置（或从 ~/.ssh/config 导入）。
+@@ -57,7 +60,8 @@ dsh plugin --profile web add link:$(pwd)/packages/dsh-ssh
+ 
+ ## 数据
+ 
+-- 主机配置：`~/.dsh/dsh-ssh.json`（版本化 JSON，原子写入）
++- 主机配置：`$DSH_HOME/dsh-ssh.json`（未设置时兼容 `~/.dsh/dsh-ssh.json`；
++  版本化 JSON，原子写入，包含服务器密钥指纹）
+ - 传输暂存：`os.tmpdir()/dsh-ssh-uploads/`
+ 
+ ## 开发
+@@ -76,3 +80,5 @@ pnpm --filter @linxin666/dsh-ssh build   # tsc 类型 + tsdown 双半区产物
+ - 跳板机 ProxyJump 的每一跳必须是本插件已配置的主机别名。
+ - 断点续传（resume）暂未实现。
+ - Agent 工具的传输为宿主机器本地路径（与 ssh-skill 相同的语义）。
++- 服务器在原地址合法更换密钥时，先在独立渠道核对新指纹，再删除并重新创建该主机；
++  首次信任本身仍可能受到第一次连接时的中间人攻击。
+diff --git a/lib/index.js b/lib/index.js
+index 81fb0512ff1ad48dc972c7c0a61c30e5625a497c..73dcebb63e0db8f676d22d5ca747f2a2b0f12786 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -1,11 +1,11 @@
+ import { installSettingsSection, settingsNamespace } from "@deepseek-ai/dsh-settings";
++import { createHash, randomBytes } from "node:crypto";
+ import { createServer } from "node:net";
+ import { createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+ import { basename, dirname, join, relative, resolve } from "node:path";
+ import { Client } from "ssh2";
+ import { homedir, tmpdir } from "node:os";
+ import { unlink } from "node:fs/promises";
+-import { randomBytes } from "node:crypto";
+ import { WebSocket, WebSocketServer } from "ws";
+ import { defineTool } from "@deepseek-ai/dsh-tools";
+ //#region \0rolldown/runtime.js
+@@ -31,7 +31,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
+ 	enumerable: true
+ }) : target, mod));
+ //#endregion
+-//#region ../../node_modules/.pnpm/cosmokit@1.8.1/node_modules/cosmokit/lib/index.cjs
++//#region ../../../deepseeker-dsh-web-ui-build/node_modules/.pnpm/cosmokit@1.8.1/node_modules/cosmokit/lib/index.cjs
+ var require_lib$1 = /* @__PURE__ */ __commonJSMin(((exports, module) => {
+ 	var __defProp = Object.defineProperty;
+ 	var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+@@ -1025,7 +1025,7 @@ var import_lib = /* @__PURE__ */ __toESM((/* @__PURE__ */ __commonJSMin(((export
+ 	module.exports = Schema;
+ })))(), 1);
+ /**
+-* Host config store: one JSON file (`~/.dsh/dsh-ssh.json`) holding every
++* Host config store: one JSON file under the current DSH home holding every
+ * SSH host entry, written atomically (tmp + rename). Also parses the user's
+ * standard `~/.ssh/config` for one-shot import. Secrets (passwords,
+ * passphrases) live in this user-owned file in plaintext — same trust model
+@@ -1033,9 +1033,10 @@ var import_lib = /* @__PURE__ */ __toESM((/* @__PURE__ */ __commonJSMin(((export
+ */
+ /** File format version. */
+ const FORMAT_VERSION = 1;
+-/** Store file location: <home>/.dsh/dsh-ssh.json. */
++/** Store file location: $DSH_HOME/dsh-ssh.json, with the legacy home fallback. */
+ function storePath() {
+-	return join(homedir(), ".dsh", "dsh-ssh.json");
++	const configuredHome = process.env.DSH_HOME?.trim();
++	return join(configuredHome === void 0 || configuredHome === "" ? join(homedir(), ".dsh") : configuredHome, "dsh-ssh.json");
+ }
+ /** The user's standard OpenSSH config path. */
+ function sshConfigPath() {
+@@ -1088,6 +1089,29 @@ var HostStore = class {
+ 	find(alias) {
+ 		return this.list().find((entry) => entry.alias === alias);
+ 	}
++	/**
++	* Persist the first SHA-256 server-key fingerprint for an alias, then
++	* require every later connection to present the same key.
++	* @param alias - configured host alias.
++	* @param fingerprint - canonical `SHA256:<base64>` server-key fingerprint.
++	* @returns whether the key was first-trusted, matched, or changed.
++	*/
++	verifyOrTrustHostKey(alias, fingerprint) {
++		if (!/^SHA256:[A-Za-z0-9+/]{43}$/.test(fingerprint)) throw new Error("host key fingerprint must be an unpadded SHA-256 base64 digest");
++		const file = this.load();
++		const entry = file.hosts.find((candidate) => candidate.alias === alias);
++		if (entry === void 0) throw new Error(`alias '${alias}' not found`);
++		if (entry.hostKeyFingerprint === void 0) {
++			entry.hostKeyFingerprint = fingerprint;
++			this.save(file);
++			return { status: "trusted" };
++		}
++		if (entry.hostKeyFingerprint === fingerprint) return { status: "matched" };
++		return {
++			status: "changed",
++			expected: entry.hostKeyFingerprint
++		};
++	}
+ 	/** Secret-free projection for the browser and agent surfaces. */
+ 	summarize(entry) {
+ 		let keyReady = true;
+@@ -1120,22 +1144,28 @@ var HostStore = class {
+ 		const file = this.load();
+ 		if (file.hosts.some((entry) => entry.alias === alias)) throw new Error(`alias '${alias}' already exists`);
+ 		const now = Date.now();
++		const auth = payload.auth.kind === "key" ? {
++			kind: "key",
++			keyPath: expandHome(payload.auth.keyPath?.trim() ?? ""),
++			...payload.auth.passphrase !== void 0 ? { passphrase: payload.auth.passphrase } : {}
++		} : {
++			kind: "password",
++			...payload.auth.password !== void 0 ? { password: payload.auth.password } : {}
++		};
++		const description = payload.description?.trim();
++		const environment = payload.environment?.trim();
++		const location = payload.location?.trim();
+ 		const entry = {
+ 			alias,
+ 			host: payload.host.trim(),
+ 			port: payload.port ?? 22,
+ 			user: payload.user.trim(),
+-			auth: {
+-				kind: payload.auth.kind,
+-				keyPath: payload.auth.kind === "key" ? expandHome(payload.auth.keyPath?.trim() ?? "") : void 0,
+-				passphrase: payload.auth.kind === "key" ? payload.auth.passphrase ?? void 0 : void 0,
+-				password: payload.auth.kind === "password" ? payload.auth.password : void 0
+-			},
++			auth,
+ 			proxyJump: [...payload.proxyJump ?? []],
+-			description: payload.description?.trim() || void 0,
+-			environment: payload.environment?.trim() || void 0,
++			...description ? { description } : {},
++			...environment ? { environment } : {},
+ 			tags: [...payload.tags ?? []].map((tag) => tag.trim()).filter((tag) => tag !== ""),
+-			location: payload.location?.trim() || void 0,
++			...location ? { location } : {},
+ 			createdAt: now,
+ 			updatedAt: now
+ 		};
+@@ -1153,6 +1183,7 @@ var HostStore = class {
+ 		if (patch.port !== void 0 && (typeof patch.port !== "number" || !Number.isInteger(patch.port) || patch.port < 1 || patch.port > 65535)) throw new Error("port must be an integer in 1..65535");
+ 		if (patch.proxyJump !== void 0 && (!Array.isArray(patch.proxyJump) || patch.proxyJump.some((x) => typeof x !== "string" || x === ""))) throw new Error("proxyJump must be an array of alias strings");
+ 		if (patch.tags !== void 0 && (!Array.isArray(patch.tags) || patch.tags.some((x) => typeof x !== "string"))) throw new Error("tags must be an array of strings");
++		const endpointChanged = patch.host !== void 0 && patch.host.trim() !== entry.host || patch.port !== void 0 && patch.port !== entry.port;
+ 		if (patch.host !== void 0) entry.host = patch.host.trim();
+ 		if (patch.port !== void 0) entry.port = patch.port;
+ 		if (patch.user !== void 0) entry.user = patch.user.trim();
+@@ -1162,18 +1193,34 @@ var HostStore = class {
+ 			if (auth.kind === "key" && (typeof auth.keyPath !== "string" || auth.keyPath.trim() === "")) throw new Error("auth.keyPath is required for key auth");
+ 			if (auth.kind === "password" && auth.password !== void 0 && typeof auth.password !== "string") throw new Error("auth.password must be a string when provided");
+ 			const keyChanged = auth.kind === "key" && auth.keyPath !== void 0 && expandHome(auth.keyPath.trim()) !== entry.auth.keyPath;
+-			entry.auth = {
+-				kind: auth.kind,
+-				keyPath: auth.kind === "key" ? expandHome(auth.keyPath?.trim() ?? "") : void 0,
+-				passphrase: auth.kind === "key" ? auth.passphrase !== void 0 ? auth.passphrase : keyChanged ? void 0 : entry.auth.passphrase : void 0,
+-				password: auth.kind === "password" ? auth.password : void 0
++			const passphrase = auth.kind === "key" ? auth.passphrase !== void 0 ? auth.passphrase : keyChanged ? void 0 : entry.auth.passphrase : void 0;
++			entry.auth = auth.kind === "key" ? {
++				kind: "key",
++				keyPath: expandHome(auth.keyPath?.trim() ?? ""),
++				...passphrase !== void 0 ? { passphrase } : {}
++			} : {
++				kind: "password",
++				...auth.password !== void 0 ? { password: auth.password } : {}
+ 			};
+ 		}
+ 		if (patch.proxyJump !== void 0) entry.proxyJump = [...patch.proxyJump];
+-		if (patch.description !== void 0) entry.description = patch.description.trim() || void 0;
+-		if (patch.environment !== void 0) entry.environment = patch.environment.trim() || void 0;
++		if (patch.description !== void 0) {
++			const description = patch.description.trim();
++			if (description === "") delete entry.description;
++			else entry.description = description;
++		}
++		if (patch.environment !== void 0) {
++			const environment = patch.environment.trim();
++			if (environment === "") delete entry.environment;
++			else entry.environment = environment;
++		}
+ 		if (patch.tags !== void 0) entry.tags = [...patch.tags].map((tag) => tag.trim()).filter((tag) => tag !== "");
+-		if (patch.location !== void 0) entry.location = patch.location.trim() || void 0;
++		if (patch.location !== void 0) {
++			const location = patch.location.trim();
++			if (location === "") delete entry.location;
++			else entry.location = location;
++		}
++		if (endpointChanged) delete entry.hostKeyFingerprint;
+ 		entry.updatedAt = Date.now();
+ 		this.save(file);
+ 		return entry;
+@@ -1215,8 +1262,11 @@ var HostStore = class {
+ 			if (line === "" || line.startsWith("#")) continue;
+ 			const match = /^([A-Za-z0-9_\-]+)\s+(.+)$/.exec(line);
+ 			if (match === null) continue;
+-			const key = match[1].toLowerCase();
+-			const value = match[2].trim();
++			const keyPart = match[1];
++			const valuePart = match[2];
++			if (keyPart === void 0 || valuePart === void 0) continue;
++			const key = keyPart.toLowerCase();
++			const value = valuePart.trim();
+ 			if (key === "host") {
+ 				current = {
+ 					pattern: value,
+@@ -1228,6 +1278,7 @@ var HostStore = class {
+ 		let added = 0;
+ 		for (const block of blocks) {
+ 			const pattern = block.pattern.split(/\s+/)[0];
++			if (pattern === void 0 || pattern === "") continue;
+ 			if (pattern.includes("*") || pattern.includes("?")) {
+ 				skip(pattern, this.skippedNames);
+ 				continue;
+@@ -1241,21 +1292,29 @@ var HostStore = class {
+ 				skip(pattern, this.skippedNames);
+ 				continue;
+ 			}
++			const identityFile = block.props.identityfile;
++			const password = block.props.password;
++			const auth = identityFile !== void 0 ? {
++				kind: "key",
++				keyPath: identityFile
++			} : {
++				kind: "password",
++				...password !== void 0 ? { password } : {}
++			};
++			const description = block.props.description;
++			const environment = block.props.environment;
++			const location = block.props.location;
+ 			const payload = {
+ 				alias: pattern,
+ 				host: hostName,
+ 				port: block.props.port !== void 0 ? Number.parseInt(block.props.port, 10) : 22,
+ 				user: block.props.user ?? process.env.USER ?? "root",
+-				auth: {
+-					kind: block.props.identityfile !== void 0 ? "key" : "password",
+-					keyPath: block.props.identityfile,
+-					password: block.props.password
+-				},
++				auth,
+ 				proxyJump: block.props.proxyjump !== void 0 ? block.props.proxyjump.split(",").map((hop) => hop.trim()).filter((hop) => hop !== "") : [],
+-				description: block.props.description,
+-				environment: block.props.environment,
++				...description !== void 0 ? { description } : {},
++				...environment !== void 0 ? { environment } : {},
+ 				tags: (block.props.tags ?? "").split(",").map((tag) => tag.trim()).filter((tag) => tag !== ""),
+-				location: block.props.location
++				...location !== void 0 ? { location } : {}
+ 			};
+ 			try {
+ 				this.create(payload);
+@@ -1339,8 +1398,9 @@ function buildConnectConfig(entry, sock) {
+ 		keepaliveCountMax: 3
+ 	};
+ 	if (sock !== void 0) config.sock = sock;
+-	if (entry.auth.kind === "password") config.password = entry.auth.password;
+-	else {
++	if (entry.auth.kind === "password") {
++		if (entry.auth.password !== void 0) config.password = entry.auth.password;
++	} else {
+ 		const keyPath = entry.auth.keyPath === void 0 ? void 0 : expandHome(entry.auth.keyPath);
+ 		if (keyPath === void 0 || !existsSync(keyPath)) throw new Error(`private key not found: '${entry.auth.keyPath ?? "(unset)"}'`);
+ 		config.privateKey = readFileSync(keyPath, "utf8");
+@@ -1348,6 +1408,40 @@ function buildConnectConfig(entry, sock) {
+ 	}
+ 	return config;
+ }
++/** Canonical OpenSSH-style SHA-256 fingerprint for one raw server key. */
++function fingerprintHostKey(key) {
++	return `SHA256:${createHash("sha256").update(key).digest("base64").replace(/=+$/, "")}`;
++}
++/** A pinned alias presented a different server key. This failure is never retried. */
++var HostKeyMismatchError = class extends Error {
++	/**
++	* @param alias - configured host alias.
++	* @param expected - persisted fingerprint.
++	* @param received - fingerprint presented by the server.
++	*/
++	constructor(alias, expected, received) {
++		super(`SSH host key changed for '${alias}': expected ${expected}, received ${received}; verify the server key before deleting and recreating this host`);
++		this.name = "HostKeyMismatchError";
++	}
++};
++/**
++* Run an asynchronous operation up to its attempt budget. Host-key changes
++* fail immediately because repeating the handshake cannot make them safe.
++* @param attempts - positive attempt budget.
++* @param operation - one attempt, receiving its one-based number.
++* @returns the first successful result.
++*/
++async function retryOperation(attempts, operation) {
++	if (!Number.isInteger(attempts) || attempts < 1) throw new RangeError("attempts must be a positive integer");
++	let lastError;
++	for (let attempt = 1; attempt <= attempts; attempt += 1) try {
++		return await operation(attempt);
++	} catch (error) {
++		if (error instanceof HostKeyMismatchError) throw error;
++		lastError = error;
++	}
++	throw lastError instanceof Error ? lastError : new Error(String(lastError));
++}
+ /** Connect one ssh2 client (resolve on ready, reject on error/close). */
+ function connectClient(config) {
+ 	return new Promise((resolve, reject) => {
+@@ -1408,8 +1502,11 @@ var SshEngine = class {
+ 	opts;
+ 	pool = /* @__PURE__ */ new Map();
+ 	tunnels = /* @__PURE__ */ new Map();
++	shells = /* @__PURE__ */ new Map();
++	shellGenerations = /* @__PURE__ */ new Map();
+ 	sweepTimer;
+ 	nextTunnelId = 1;
++	disposed = false;
+ 	/**
+ 	* @param store - the host config store.
+ 	* @param options - engine knobs (defaults applied).
+@@ -1438,8 +1535,7 @@ var SshEngine = class {
+ 	* attempt budget) when the connection broke mid-flight.
+ 	*/
+ 	async withClient(alias, fn, attempts = 3) {
+-		let lastError;
+-		for (let attempt = 1; attempt <= attempts; attempt += 1) {
++		return retryOperation(attempts, async () => {
+ 			let record = this.pool.get(alias);
+ 			if (record === void 0 || record.broken) {
+ 				if (record !== void 0) this.disposeRecord(alias, record);
+@@ -1451,11 +1547,13 @@ var SshEngine = class {
+ 				const result = await fn(record.client);
+ 				record.idleAt = Date.now();
+ 				return result;
++			} catch (error) {
++				record.broken = true;
++				throw error;
+ 			} finally {
+ 				record.inFlight -= 1;
+ 			}
+-		}
+-		throw lastError instanceof Error ? lastError : new Error(String(lastError));
++		});
+ 	}
+ 	/**
+ 	* Build one full jump chain for an entry: hop clients connected through in
+@@ -1466,16 +1564,16 @@ var SshEngine = class {
+ 		const hops = [];
+ 		let sock;
+ 		const chain = entry.proxyJump;
+-		for (let index = 0; index < chain.length; index += 1) {
+-			const hopAlias = chain[index];
++		for (const [index, hopAlias] of chain.entries()) {
+ 			const hop = this.store.find(hopAlias);
+ 			if (hop === void 0) {
+ 				for (const client of hops) client.end();
+ 				throw new Error(`proxyJump alias '${hopAlias}' not found — create it first`);
+ 			}
+-			const hopClient = await connectClient(buildConnectConfig(hop, sock));
++			const hopClient = await this.connectEntry(hop, sock);
+ 			hops.push(hopClient);
+-			const next = index + 1 < chain.length ? this.store.find(chain[index + 1]) : void 0;
++			const nextAlias = chain[index + 1];
++			const next = nextAlias === void 0 ? void 0 : this.store.find(nextAlias);
+ 			const nextHost = next !== void 0 ? next.host : entry.host;
+ 			const nextPort = next !== void 0 ? next.port : entry.port;
+ 			sock = await new Promise((resolve, reject) => {
+@@ -1489,7 +1587,7 @@ var SshEngine = class {
+ 		}
+ 		try {
+ 			return {
+-				client: await connectClient(buildConnectConfig(entry, sock)),
++				client: await this.connectEntry(entry, sock),
+ 				hops
+ 			};
+ 		} catch (error) {
+@@ -1497,6 +1595,24 @@ var SshEngine = class {
+ 			throw error;
+ 		}
+ 	}
++	/** Connect one entry while enforcing its persisted TOFU server-key pin. */
++	async connectEntry(entry, sock) {
++		let mismatch;
++		const config = buildConnectConfig(entry, sock);
++		config.hostVerifier = (key) => {
++			const fingerprint = fingerprintHostKey(key);
++			const verification = this.store.verifyOrTrustHostKey(entry.alias, fingerprint);
++			if (verification.status !== "changed") return true;
++			mismatch = new HostKeyMismatchError(entry.alias, verification.expected, fingerprint);
++			return false;
++		};
++		try {
++			return await connectClient(config);
++		} catch (error) {
++			if (mismatch !== void 0) throw mismatch;
++			throw error;
++		}
++	}
+ 	/** In-flight acquire promises, deduped per alias (concurrent first use). */
+ 	acquireQueue = /* @__PURE__ */ new Map();
+ 	/** Connect (or reuse) the pooled chain for one alias; pins nothing. */
+@@ -1586,7 +1702,7 @@ var SshEngine = class {
+ 							stdout: stdout.text,
+ 							stderr: stderr.text,
+ 							durationMs: Date.now() - started,
+-							error: timedOut ? `command timed out after ${budget} ms` : void 0
++							...timedOut ? { error: `command timed out after ${budget} ms` } : {}
+ 						});
+ 					};
+ 					const timer = setTimeout(() => {
+@@ -1661,79 +1777,146 @@ var SshEngine = class {
+ 		await Promise.all(Array.from({ length: workers }, () => run()));
+ 		return results;
+ 	}
++	/** Register one shell owner so host changes and plugin disposal can close it. */
++	registerShell(alias, owner) {
++		const owners = this.shells.get(alias) ?? /* @__PURE__ */ new Set();
++		owners.add(owner);
++		this.shells.set(alias, owners);
++	}
++	/** Remove one owner without disturbing newer shells for the same alias. */
++	unregisterShell(alias, owner) {
++		const owners = this.shells.get(alias);
++		if (owners === void 0) return;
++		owners.delete(owner);
++		if (owners.size === 0) this.shells.delete(alias);
++	}
++	/** Invalidate pending opens and close every live shell for one alias. */
++	closeShells(alias) {
++		this.shellGenerations.set(alias, (this.shellGenerations.get(alias) ?? 0) + 1);
++		const owners = this.shells.get(alias);
++		if (owners === void 0) return;
++		this.shells.delete(alias);
++		for (const owner of [...owners]) owner.close();
++	}
+ 	/** Open a PTY shell session for the web terminal (standalone connection). */
+ 	async openShell(alias, size) {
++		if (this.disposed) throw new Error("SSH engine is disposed");
++		const generation = this.shellGenerations.get(alias) ?? 0;
+ 		const entry = this.store.find(alias);
+ 		if (entry === void 0) throw new Error(`alias '${alias}' not found — add it first`);
+ 		const { client, hops } = await this.connectChain(entry);
++		const closeClients = () => {
++			try {
++				client.end();
++			} catch {}
++			for (const hop of hops) try {
++				hop.end();
++			} catch {}
++		};
++		if (this.disposed || (this.shellGenerations.get(alias) ?? 0) !== generation) {
++			closeClients();
++			throw new Error(`SSH shell for alias '${alias}' was closed before it opened`);
++		}
+ 		return await new Promise((resolve, reject) => {
+-			client.shell({
+-				term: "xterm-256color",
+-				cols: size.cols,
+-				rows: size.rows
+-			}, (error, stream) => {
+-				if (error !== void 0) {
+-					try {
+-						client.end();
+-					} catch {}
+-					for (const hop of hops) try {
+-						hop.end();
+-					} catch {}
+-					reject(error);
+-					return;
++			let settled = false;
++			let tornDown = false;
++			let closeChannel = () => {};
++			const owner = { close: () => {} };
++			const teardown = () => {
++				if (tornDown) return;
++				tornDown = true;
++				this.unregisterShell(alias, owner);
++				closeClients();
++			};
++			owner.close = () => {
++				if (tornDown) return;
++				closeChannel();
++				teardown();
++				if (!settled) {
++					settled = true;
++					reject(/* @__PURE__ */ new Error(`SSH shell for alias '${alias}' was closed before it opened`));
+ 				}
+-				let tornDown = false;
+-				const teardown = () => {
+-					if (tornDown) return;
+-					tornDown = true;
+-					try {
+-						client.end();
+-					} catch {}
+-					for (const hop of hops) try {
+-						hop.end();
+-					} catch {}
+-				};
+-				const session = {
+-					send: (data) => {
+-						try {
+-							stream.write(data);
+-						} catch {}
+-					},
+-					resize: (cols, rows) => {
+-						try {
+-							stream.setWindow(rows, cols, rows, cols);
+-						} catch {}
+-					},
+-					close: () => {
+-						try {
++			};
++			this.registerShell(alias, owner);
++			try {
++				client.shell({
++					term: "xterm-256color",
++					cols: size.cols,
++					rows: size.rows
++				}, (error, stream) => {
++					if (settled) {
++						if (error === void 0) try {
+ 							stream.close();
+ 						} catch {}
++						return;
++					}
++					if (error !== void 0) {
++						settled = true;
+ 						teardown();
+-					},
+-					pause: () => {
++						reject(error);
++						return;
++					}
++					if (this.disposed || (this.shellGenerations.get(alias) ?? 0) !== generation) {
+ 						try {
+-							stream.pause();
++							stream.close();
+ 						} catch {}
+-					},
+-					resume: () => {
++						settled = true;
++						teardown();
++						reject(/* @__PURE__ */ new Error(`SSH shell for alias '${alias}' was closed before it opened`));
++						return;
++					}
++					closeChannel = () => {
+ 						try {
+-							stream.resume();
++							stream.close();
+ 						} catch {}
+-					}
+-				};
+-				stream.on("data", (chunk) => {
+-					session.onData?.(chunk);
+-				});
+-				stream.on("close", (code) => {
+-					teardown();
+-					session.onExit?.(code);
+-				});
+-				stream.on("error", (streamError) => {
+-					teardown();
+-					session.onExit?.(null, streamError instanceof Error ? streamError.message : String(streamError));
++					};
++					let exitNotified = false;
++					const session = {
++						send: (data) => {
++							try {
++								stream.write(data);
++							} catch {}
++						},
++						resize: (cols, rows) => {
++							try {
++								stream.setWindow(rows, cols, rows, cols);
++							} catch {}
++						},
++						close: owner.close,
++						pause: () => {
++							try {
++								stream.pause();
++							} catch {}
++						},
++						resume: () => {
++							try {
++								stream.resume();
++							} catch {}
++						}
++					};
++					const finish = (code, errorMessage) => {
++						if (exitNotified) return;
++						exitNotified = true;
++						teardown();
++						session.onExit?.(code, errorMessage);
++					};
++					stream.on("data", (chunk) => {
++						session.onData?.(chunk);
++					});
++					stream.on("close", (code) => {
++						finish(code);
++					});
++					stream.on("error", (streamError) => {
++						finish(null, streamError instanceof Error ? streamError.message : String(streamError));
++					});
++					settled = true;
++					resolve(session);
+ 				});
+-				resolve(session);
+-			});
++			} catch (error) {
++				settled = true;
++				teardown();
++				reject(error);
++			}
+ 		});
+ 	}
+ 	/** Upload one local file (or directory tree) to a remote path. */
+@@ -1858,7 +2041,7 @@ var SshEngine = class {
+ 						transferred,
+ 						total,
+ 						percent: total > 0 ? Math.round(transferred / total * 1e3) / 10 : 0,
+-						speedBps: elapsed > 0 ? Math.round((transferred - last) / elapsed) : void 0
++						...elapsed > 0 ? { speedBps: Math.round((transferred - last) / elapsed) } : {}
+ 					});
+ 					last = transferred;
+ 				}
+@@ -1904,7 +2087,7 @@ var SshEngine = class {
+ 						transferred,
+ 						total,
+ 						percent: total > 0 ? Math.round(transferred / total * 1e3) / 10 : 0,
+-						speedBps: elapsed > 0 ? Math.round((transferred - last) / elapsed) : void 0
++						...elapsed > 0 ? { speedBps: Math.round((transferred - last) / elapsed) } : {}
+ 					});
+ 					last = transferred;
+ 				}
+@@ -2028,6 +2211,15 @@ var SshEngine = class {
+ 		}
+ 		return count;
+ 	}
++	/**
++	* Close every tunnel and pooled connection for one alias.
++	* @param alias - configured host alias.
++	*/
++	disconnect(alias) {
++		this.closeShells(alias);
++		this.stopAllTunnels(alias);
++		this.disposeRecord(alias);
++	}
+ 	/** Probe connectivity: connect, run `true`, close. */
+ 	async test(alias) {
+ 		const started = Date.now();
+@@ -2051,7 +2243,10 @@ var SshEngine = class {
+ 	}
+ 	/** Close every pooled connection and tunnel. */
+ 	dispose() {
++		if (this.disposed) return;
++		this.disposed = true;
+ 		if (this.sweepTimer !== void 0) clearInterval(this.sweepTimer);
++		for (const alias of [...this.shells.keys()]) this.closeShells(alias);
+ 		for (const id of [...this.tunnels.keys()]) this.stopTunnel(id);
+ 		for (const alias of [...this.pool.keys()]) this.disposeRecord(alias);
+ 	}
+@@ -2084,12 +2279,21 @@ const SSH_API = {
+ const MAX_JSON_BODY_BYTES = 64 * 1024;
+ /** Cap on declared upload bodies (staged to disk before SFTP). */
+ const MAX_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024;
++/** Terminal input and PTY dimension limits shared by upgrade/query frames. */
++const MAX_TERMINAL_INPUT_BYTES = 64 * 1024;
++const MIN_TERMINAL_COLS = 2;
++const MAX_TERMINAL_COLS = 500;
++const MIN_TERMINAL_ROWS = 1;
++const MAX_TERMINAL_ROWS = 200;
+ /**
+ * One noServer WebSocket server for terminal upgrades: the browser half uses
+ * a standards-compliant WebSocket, so the host must speak real RFC 6455
+ * frames (the webserver hands us the raw upgraded socket).
+ */
+-const terminalWss = new WebSocketServer({ noServer: true });
++const terminalWss = new WebSocketServer({
++	noServer: true,
++	maxPayload: 128 * 1024
++});
+ /** Pause the shell when the socket's send buffer exceeds this… */
+ const BACKPRESSURE_HIGH_WATER = 1024 * 1024;
+ /** …and resume once it drains below this. */
+@@ -2147,6 +2351,73 @@ function queryParam(url, name) {
+ 	const value = url.searchParams.get(name);
+ 	return value === null ? void 0 : value;
+ }
++/** Parse one strict base-10 query dimension, applying its default only when absent. */
++function queryDimension(value, fallback) {
++	if (value === void 0) return fallback;
++	if (!/^\d+$/.test(value)) return void 0;
++	const parsed = Number(value);
++	return Number.isSafeInteger(parsed) ? parsed : void 0;
++}
++/** Accept only PTY dimensions supported by xterm and ssh2. */
++function terminalSize(cols, rows) {
++	return typeof cols === "number" && Number.isInteger(cols) && cols >= MIN_TERMINAL_COLS && cols <= MAX_TERMINAL_COLS && typeof rows === "number" && Number.isInteger(rows) && rows >= MIN_TERMINAL_ROWS && rows <= MAX_TERMINAL_ROWS ? {
++		cols,
++		rows
++	} : void 0;
++}
++/** Parse one text frame without trusting TypeScript-only protocol shapes. */
++function parseTerminalClientFrame(data) {
++	let value;
++	try {
++		value = JSON.parse(data);
++	} catch {
++		return {
++			ok: false,
++			code: 1008,
++			reason: "invalid terminal frame"
++		};
++	}
++	if (typeof value !== "object" || value === null || Array.isArray(value)) return {
++		ok: false,
++		code: 1008,
++		reason: "invalid terminal frame"
++	};
++	const frame = value;
++	if (frame.type === "input") {
++		if (typeof frame.data !== "string") return {
++			ok: false,
++			code: 1008,
++			reason: "invalid terminal input"
++		};
++		if (Buffer.byteLength(frame.data, "utf8") > MAX_TERMINAL_INPUT_BYTES) return {
++			ok: false,
++			code: 1009,
++			reason: "terminal input too large"
++		};
++		return {
++			ok: true,
++			frame: {
++				type: "input",
++				data: frame.data
++			}
++		};
++	}
++	if (frame.type === "resize") {
++		const size = terminalSize(frame.cols, frame.rows);
++		if (size !== void 0) return {
++			ok: true,
++			frame: {
++				type: "resize",
++				...size
++			}
++		};
++	}
++	return {
++		ok: false,
++		code: 1008,
++		reason: "invalid terminal frame"
++	};
++}
+ /**
+ * Build every /api/dsh-ssh route (exact paths) plus the terminal upgrade.
+ * @param deps - store, engine, staging dir.
+@@ -2215,6 +2486,7 @@ function makeRoutes(deps) {
+ 						}
+ 						try {
+ 							const entry = store.update(alias, body);
++							engine.disconnect(alias);
+ 							writeJson(res, 200, { host: store.summarize(entry) });
+ 						} catch (error) {
+ 							writeJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+@@ -2223,7 +2495,7 @@ function makeRoutes(deps) {
+ 					}
+ 					if (method === "DELETE") {
+ 						try {
+-							engine.stopAllTunnels(alias);
++							engine.disconnect(alias);
+ 							store.delete(alias);
+ 							writeJson(res, 200, { ok: true });
+ 						} catch (error) {
+@@ -2303,11 +2575,11 @@ function makeRoutes(deps) {
+ 					try {
+ 						writeJson(res, 200, { results: await engine.cluster({
+ 							command,
+-							aliases,
+-							environment,
+-							tags,
+-							timeoutMs,
+-							maxWorkers
++							...aliases !== void 0 ? { aliases } : {},
++							...environment !== void 0 ? { environment } : {},
++							...tags !== void 0 ? { tags } : {},
++							...timeoutMs !== void 0 ? { timeoutMs } : {},
++							...maxWorkers !== void 0 ? { maxWorkers } : {}
+ 						}) });
+ 					} catch (error) {
+ 						writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
+@@ -2352,10 +2624,12 @@ function makeRoutes(deps) {
+ 							return;
+ 						}
+ 						try {
++							const remoteHost = typeof body?.remoteHost === "string" && body.remoteHost !== "" ? body.remoteHost : void 0;
++							const localPort = typeof body?.localPort === "number" ? body.localPort : void 0;
+ 							writeJson(res, 200, { tunnel: await engine.startTunnel(alias, {
+ 								remotePort,
+-								remoteHost: typeof body?.remoteHost === "string" && body.remoteHost !== "" ? body.remoteHost : void 0,
+-								localPort: typeof body?.localPort === "number" ? body.localPort : void 0
++								...remoteHost !== void 0 ? { remoteHost } : {},
++								...localPort !== void 0 ? { localPort } : {}
+ 							}) });
+ 						} catch (error) {
+ 							writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
+@@ -2522,13 +2796,17 @@ function makeRoutes(deps) {
+ 				}
+ 				const url = new URL(req.url ?? "/", "http://localhost");
+ 				const alias = queryParam(url, "alias");
+-				if (alias === void 0) {
++				if (alias === void 0 || alias === "") {
++					socket.write("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
++					socket.destroy();
++					return;
++				}
++				const size = terminalSize(queryDimension(queryParam(url, "cols"), 80), queryDimension(queryParam(url, "rows"), 24));
++				if (size === void 0) {
+ 					socket.write("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+ 					socket.destroy();
+ 					return;
+ 				}
+-				const cols = Number.parseInt(queryParam(url, "cols") ?? "80", 10);
+-				const rows = Number.parseInt(queryParam(url, "rows") ?? "24", 10);
+ 				terminalWss.handleUpgrade(req, socket, head, (ws) => {
+ 					let session;
+ 					let closed = false;
+@@ -2552,9 +2830,17 @@ function makeRoutes(deps) {
+ 						session = void 0;
+ 						if (opened !== void 0) opened.close();
+ 					};
++					const rejectFrame = (code, reason) => {
++						if (closed) return;
++						closed = true;
++						closeSession();
++						try {
++							ws.close(code, reason);
++						} catch {}
++					};
+ 					engine.openShell(alias, {
+-						cols: Number.isFinite(cols) ? cols : 80,
+-						rows: Number.isFinite(rows) ? rows : 24
++						cols: size.cols,
++						rows: size.rows
+ 					}).then((opened) => {
+ 						if (ws.readyState !== WebSocket.OPEN) {
+ 							opened.close();
+@@ -2570,10 +2856,11 @@ function makeRoutes(deps) {
+ 							data: data.toString("utf8")
+ 						});
+ 						opened.onExit = (code, error) => {
++							if (closed) return;
+ 							sendFrame({
+ 								type: "exit",
+ 								code,
+-								error
++								...error !== void 0 ? { error } : {}
+ 							});
+ 							closed = true;
+ 							try {
+@@ -2591,15 +2878,19 @@ function makeRoutes(deps) {
+ 							ws.close(1e3);
+ 						} catch {}
+ 					});
+-					ws.on("message", (data) => {
+-						let frame;
+-						try {
+-							frame = JSON.parse(String(data));
+-						} catch {
++					ws.on("message", (data, isBinary) => {
++						if (isBinary) {
++							rejectFrame(1003, "terminal accepts text frames only");
+ 							return;
+ 						}
++						const parsed = parseTerminalClientFrame(String(data));
++						if (!parsed.ok) {
++							rejectFrame(parsed.code, parsed.reason);
++							return;
++						}
++						const frame = parsed.frame;
+ 						if (frame.type === "input") session?.send(frame.data);
+-						else if (frame.type === "resize") session?.resize(Math.max(2, frame.cols), Math.max(1, frame.rows));
++						else session?.resize(frame.cols, frame.rows);
+ 					});
+ 					ws.on("close", () => {
+ 						closed = true;
+@@ -3193,12 +3484,10 @@ function sshClusterTool(engine) {
+ //#region src/index.ts
+ /** Stable cordis plugin name. */
+ const name = "ssh";
+-/** Services required before the SSH surfaces can mount. */
+-const inject = [
+-	"webServer",
+-	"tools",
+-	"systemPrompt"
+-];
++/** Services required before the SSH agent surface can mount. */
++const inject = ["tools", "systemPrompt"];
++/** Host service shared by the browser routes and preset-scoped agent tools. */
++const SSH_ENGINE_SERVICE = "deepseekerSshEngine";
+ /**
+ * Settings namespace of the SSH capability — the section the web settings
+ * surface edits. Spelled here rather than imported: the browser half spells
+@@ -3207,21 +3496,29 @@ const inject = [
+ const SSH_SETTINGS_NAMESPACE = settingsNamespace("dsh-ssh");
+ const Config = import_lib.default.object({
+ 	announceToAgent: import_lib.default.boolean().default(true),
+-	enabled: import_lib.default.boolean().default(true)
++	enabled: import_lib.default.boolean().default(true),
++	surface: import_lib.default.union([
++		"both",
++		"host",
++		"agent"
++	]).default("both").hidden()
+ });
+ /** Schema default, re-read for hand-built test contexts (the loader applies them normally). */
+ const DEFAULT_ANNOUNCE = true;
+ /** Order of the announcement section within the tool-guidance band. */
+ const SECTION_ORDER = 150;
+ /** Model-facing announcement: plugin presence, capabilities, and limits. */
+-const SSH_GUIDANCE = "本机已安装 dsh-ssh 插件（DSH 远程 SSH 运维）：侧边栏「SSH」入口；在 dsh-web-ui 插件全家桶仓库（packages/dsh-ssh）统一维护。能力：主机配置存 ~/.dsh/dsh-ssh.json（可从 ~/.ssh/config 导入）；持久连接池复用长连接（空闲 30 分钟自动断开）；ssh_list 列出主机、ssh_exec 执行远程命令、ssh_upload/ssh_download 传输文件、ssh_tunnel 本地端口转发（访问远程数据库/内网服务）、ssh_cluster 集群并发执行；支持密钥/密码认证、passphrase 密钥与 ProxyJump 跳板机；Web 终端走 WebSocket。限制：主机操作由用户在 GUI 中配置后 agent 方可使用；密码以明文存在用户主目录私有文件（权限 0600）；命令输出原样返回、可能含敏感信息；断线重连可能重放非幂等命令；传输/执行消耗真实远程资源，先确认再操作。用户提到「SSH / 远程服务器 / 服务器操作 / 跳板机 / 隧道 / 部署 / 上传下载」时即指本插件，请据此协作。";
++const SSH_GUIDANCE = "本机已安装 dsh-ssh 插件（DSH 远程 SSH 运维）：侧边栏「SSH」入口；在 dsh-web-ui 插件全家桶仓库（packages/dsh-ssh）统一维护。能力：主机配置存 $DSH_HOME/dsh-ssh.json（未设置时兼容 ~/.dsh/dsh-ssh.json，可从 ~/.ssh/config 导入）；持久连接池复用长连接（空闲 30 分钟自动断开）；ssh_list 列出主机、ssh_exec 执行远程命令、ssh_upload/ssh_download 传输文件、ssh_tunnel 本地端口转发（访问远程数据库/内网服务）、ssh_cluster 集群并发执行；支持密钥/密码认证、passphrase 密钥与 ProxyJump 跳板机；Web 终端走 WebSocket。限制：主机操作由用户在 GUI 中配置后 agent 方可使用；密码以明文存在当前 DSH_HOME 的私有文件（权限 0600）；命令输出原样返回、可能含敏感信息；断线重连可能重放非幂等命令；传输/执行消耗真实远程资源，先确认再操作。用户提到「SSH / 远程服务器 / 服务器操作 / 跳板机 / 隧道 / 部署 / 上传下载」时即指本插件，请据此协作。";
+ /**
+ * Mount the SSH engine, routes, tools, and announcement.
+ * @param ctx - host plugin context carrying webServer/tools/systemPrompt.
+ * @param config - resolved plugin config (schema defaults applied by the loader).
+ */
+ function apply(ctx, config) {
+-	let current = () => config ?? {};
++	const surface = config?.surface ?? "both";
++	const ownsHostSurface = surface !== "agent";
++	const ownsAgentSurface = surface !== "host";
++	let current = ownsHostSurface ? () => config ?? {} : () => ctx.get("settings")?.get(SSH_SETTINGS_NAMESPACE) ?? config ?? {};
+ 	const resolve = () => {
+ 		const value = current();
+ 		return {
+@@ -3229,16 +3526,18 @@ function apply(ctx, config) {
+ 			enabled: value.enabled ?? true
+ 		};
+ 	};
++	const sharedEngine = ctx.get(SSH_ENGINE_SERVICE);
+ 	const store = new HostStore();
+-	const engine = new SshEngine(store);
+-	ctx.effect(() => () => {
++	const engine = ownsHostSurface || sharedEngine === void 0 ? new SshEngine(store) : sharedEngine;
++	if (engine !== sharedEngine) ctx.effect(() => () => {
+ 		engine.dispose();
+ 	}, "dsh-ssh: engine");
++	if (ownsHostSurface) ctx.provide(SSH_ENGINE_SERVICE, engine);
+ 	const { routes, upgrade } = makeRoutes({
+ 		store,
+ 		engine
+ 	});
+-	let disposeRoutes;
++	let syncRoutes;
+ 	const tools = [
+ 		sshListTool(engine),
+ 		sshExecTool(engine),
+@@ -3255,43 +3554,59 @@ function apply(ctx, config) {
+ 			disposeSection();
+ 			disposeSection = void 0;
+ 		}
+-		if (disposeRoutes !== void 0) {
+-			disposeRoutes();
+-			disposeRoutes = void 0;
+-		}
+ 		if (disposeTools !== void 0) {
+ 			disposeTools();
+ 			disposeTools = void 0;
+ 		}
+ 		if (!value.enabled) return;
+-		if (value.announceToAgent) disposeSection = ctx.systemPrompt.section({
++		if (ownsAgentSurface && value.announceToAgent) disposeSection = ctx.systemPrompt.section({
+ 			name: "plugin:dsh-ssh",
+ 			order: SECTION_ORDER,
+ 			text: SSH_GUIDANCE
+ 		});
+-		disposeRoutes = ctx.effect(() => {
+-			const disposers = routes.map((route) => ctx.webServer.register(route));
+-			const upgradeDisposer = ctx.webServer.registerUpgrade(upgrade);
+-			return () => {
+-				for (const dispose of disposers) dispose();
+-				upgradeDisposer();
+-			};
+-		}, "dsh-ssh: routes");
+-		disposeTools = ctx.effect(() => {
++		if (ownsAgentSurface) disposeTools = ctx.effect(() => {
+ 			const disposers = tools.map((tool) => ctx.tools.register(tool));
+ 			return () => {
+ 				for (const dispose of disposers) dispose();
+ 			};
+ 		}, "dsh-ssh: tools");
+ 	};
+-	installSettingsSection(ctx, SSH_SETTINGS_NAMESPACE, Config, config ?? {}, {
+-		setSource: (source) => {
+-			current = source;
+-			sync();
+-		},
+-		onChange: sync
++	if (ownsHostSurface) {
++		ctx.inject(["webServer"], (routeCtx) => {
++			let disposeRoutes;
++			syncRoutes = () => {
++				disposeRoutes?.();
++				disposeRoutes = void 0;
++				if (!resolve().enabled) return;
++				disposeRoutes = routeCtx.effect(() => {
++					const disposers = routes.map((route) => routeCtx.webServer.register(route));
++					const upgradeDisposer = routeCtx.webServer.registerUpgrade(upgrade);
++					return () => {
++						for (const dispose of disposers) dispose();
++						upgradeDisposer();
++					};
++				}, "dsh-ssh: routes");
++			};
++			routeCtx.effect(() => () => {
++				syncRoutes = void 0;
++			}, "dsh-ssh: route sync");
++			syncRoutes();
++		});
++		installSettingsSection(ctx, SSH_SETTINGS_NAMESPACE, Config, config ?? {}, {
++			setSource: (source) => {
++				current = source;
++				sync();
++				syncRoutes?.();
++			},
++			onChange: () => {
++				sync();
++				syncRoutes?.();
++			}
++		});
++	} else ctx.on("settings/updated", (ns) => {
++		if (ns === SSH_SETTINGS_NAMESPACE) sync();
+ 	});
+ 	sync();
+ }
+ //#endregion
+-export { Config, SSH_GUIDANCE, SSH_SETTINGS_NAMESPACE, apply, inject, name };
++export { Config, SSH_ENGINE_SERVICE, SSH_GUIDANCE, SSH_SETTINGS_NAMESPACE, apply, inject, name };
+diff --git a/lib/types/engine.d.ts b/lib/types/engine.d.ts
+index 68006e8b924e4dacc4fbf562d6ddf6ddeb601031..f836da6a2a2ec42a8750cfe72912cc785c345cc0 100644
+--- a/lib/types/engine.d.ts
++++ b/lib/types/engine.d.ts
+@@ -40,6 +40,25 @@ export interface ShellSession {
+     /** Resume remote output delivery. */
+     resume(): void;
+ }
++/** Canonical OpenSSH-style SHA-256 fingerprint for one raw server key. */
++export declare function fingerprintHostKey(key: Buffer): string;
++/** A pinned alias presented a different server key. This failure is never retried. */
++export declare class HostKeyMismatchError extends Error {
++    /**
++     * @param alias - configured host alias.
++     * @param expected - persisted fingerprint.
++     * @param received - fingerprint presented by the server.
++     */
++    constructor(alias: string, expected: string, received: string);
++}
++/**
++ * Run an asynchronous operation up to its attempt budget. Host-key changes
++ * fail immediately because repeating the handshake cannot make them safe.
++ * @param attempts - positive attempt budget.
++ * @param operation - one attempt, receiving its one-based number.
++ * @returns the first successful result.
++ */
++export declare function retryOperation<T>(attempts: number, operation: (attempt: number) => Promise<T>): Promise<T>;
+ /**
+  * The engine. Owns the pool, tunnels, and all operations. One instance per
+  * plugin apply; dispose() closes every connection.
+@@ -49,8 +68,11 @@ export declare class SshEngine {
+     private readonly opts;
+     private readonly pool;
+     private readonly tunnels;
++    private readonly shells;
++    private readonly shellGenerations;
+     private sweepTimer;
+     private nextTunnelId;
++    private disposed;
+     /**
+      * @param store - the host config store.
+      * @param options - engine knobs (defaults applied).
+@@ -71,6 +93,8 @@ export declare class SshEngine {
+      * target client. Shared by the pool and standalone shell sessions.
+      */
+     private connectChain;
++    /** Connect one entry while enforcing its persisted TOFU server-key pin. */
++    private connectEntry;
+     /** In-flight acquire promises, deduped per alias (concurrent first use). */
+     private readonly acquireQueue;
+     /** Connect (or reuse) the pooled chain for one alias; pins nothing. */
+@@ -95,6 +119,12 @@ export declare class SshEngine {
+         timeoutMs?: number;
+         maxWorkers?: number;
+     }): Promise<ClusterResult[]>;
++    /** Register one shell owner so host changes and plugin disposal can close it. */
++    private registerShell;
++    /** Remove one owner without disturbing newer shells for the same alias. */
++    private unregisterShell;
++    /** Invalidate pending opens and close every live shell for one alias. */
++    private closeShells;
+     /** Open a PTY shell session for the web terminal (standalone connection). */
+     openShell(alias: string, size: {
+         cols: number;
+@@ -128,6 +158,11 @@ export declare class SshEngine {
+     stopTunnel(id: string): boolean;
+     /** Stop all tunnels (optionally for one alias). */
+     stopAllTunnels(alias?: string): number;
++    /**
++     * Close every tunnel and pooled connection for one alias.
++     * @param alias - configured host alias.
++     */
++    disconnect(alias: string): void;
+     /** Probe connectivity: connect, run `true`, close. */
+     test(alias: string): Promise<TestResult>;
+     /** Close every pooled connection and tunnel. */
+diff --git a/lib/types/index.d.ts b/lib/types/index.d.ts
+index d14bfc077a107bd9390cd6e9b0c7bbf3fee70ce6..6edb871d62dab245753cb21dbc21a9c0710a081b 100644
+--- a/lib/types/index.d.ts
++++ b/lib/types/index.d.ts
+@@ -9,10 +9,21 @@
+  */
+ import type { Context } from '@deepseek-ai/cordis';
+ import z from 'schemastery';
++import { SshEngine } from './engine.ts';
+ /** Stable cordis plugin name. */
+ export declare const name = "ssh";
+-/** Services required before the SSH surfaces can mount. */
++/** Services required before the SSH agent surface can mount. */
+ export declare const inject: string[];
++/** Host service shared by the browser routes and preset-scoped agent tools. */
++export declare const SSH_ENGINE_SERVICE = "deepseekerSshEngine";
++declare module '@deepseek-ai/cordis' {
++    interface Context {
++        /** Process-wide SSH engine; model tools only borrow it from their preset scope. */
++        deepseekerSshEngine: SshEngine;
++    }
++}
++/** Which half of the dual-face Host plugin one composition row owns. */
++export type SshSurface = 'both' | 'host' | 'agent';
+ /**
+  * Settings namespace of the SSH capability — the section the web settings
+  * surface edits. Spelled here rather than imported: the browser half spells
+@@ -28,10 +39,12 @@ export interface Config {
+     announceToAgent?: boolean;
+     /** Master switch for the plugin (routes, tools, prompt section). */
+     enabled?: boolean;
++    /** Internal composition split: Host UI/routes or preset-scoped agent tools. */
++    surface?: SshSurface;
+ }
+ export declare const Config: z<Config>;
+ /** Model-facing announcement: plugin presence, capabilities, and limits. */
+-export declare const SSH_GUIDANCE = "\u672C\u673A\u5DF2\u5B89\u88C5 dsh-ssh \u63D2\u4EF6\uFF08DSH \u8FDC\u7A0B SSH \u8FD0\u7EF4\uFF09\uFF1A\u4FA7\u8FB9\u680F\u300CSSH\u300D\u5165\u53E3\uFF1B\u5728 dsh-web-ui \u63D2\u4EF6\u5168\u5BB6\u6876\u4ED3\u5E93\uFF08packages/dsh-ssh\uFF09\u7EDF\u4E00\u7EF4\u62A4\u3002\u80FD\u529B\uFF1A\u4E3B\u673A\u914D\u7F6E\u5B58 ~/.dsh/dsh-ssh.json\uFF08\u53EF\u4ECE ~/.ssh/config \u5BFC\u5165\uFF09\uFF1B\u6301\u4E45\u8FDE\u63A5\u6C60\u590D\u7528\u957F\u8FDE\u63A5\uFF08\u7A7A\u95F2 30 \u5206\u949F\u81EA\u52A8\u65AD\u5F00\uFF09\uFF1Bssh_list \u5217\u51FA\u4E3B\u673A\u3001ssh_exec \u6267\u884C\u8FDC\u7A0B\u547D\u4EE4\u3001ssh_upload/ssh_download \u4F20\u8F93\u6587\u4EF6\u3001ssh_tunnel \u672C\u5730\u7AEF\u53E3\u8F6C\u53D1\uFF08\u8BBF\u95EE\u8FDC\u7A0B\u6570\u636E\u5E93/\u5185\u7F51\u670D\u52A1\uFF09\u3001ssh_cluster \u96C6\u7FA4\u5E76\u53D1\u6267\u884C\uFF1B\u652F\u6301\u5BC6\u94A5/\u5BC6\u7801\u8BA4\u8BC1\u3001passphrase \u5BC6\u94A5\u4E0E ProxyJump \u8DF3\u677F\u673A\uFF1BWeb \u7EC8\u7AEF\u8D70 WebSocket\u3002\u9650\u5236\uFF1A\u4E3B\u673A\u64CD\u4F5C\u7531\u7528\u6237\u5728 GUI \u4E2D\u914D\u7F6E\u540E agent \u65B9\u53EF\u4F7F\u7528\uFF1B\u5BC6\u7801\u4EE5\u660E\u6587\u5B58\u5728\u7528\u6237\u4E3B\u76EE\u5F55\u79C1\u6709\u6587\u4EF6\uFF08\u6743\u9650 0600\uFF09\uFF1B\u547D\u4EE4\u8F93\u51FA\u539F\u6837\u8FD4\u56DE\u3001\u53EF\u80FD\u542B\u654F\u611F\u4FE1\u606F\uFF1B\u65AD\u7EBF\u91CD\u8FDE\u53EF\u80FD\u91CD\u653E\u975E\u5E42\u7B49\u547D\u4EE4\uFF1B\u4F20\u8F93/\u6267\u884C\u6D88\u8017\u771F\u5B9E\u8FDC\u7A0B\u8D44\u6E90\uFF0C\u5148\u786E\u8BA4\u518D\u64CD\u4F5C\u3002\u7528\u6237\u63D0\u5230\u300CSSH / \u8FDC\u7A0B\u670D\u52A1\u5668 / \u670D\u52A1\u5668\u64CD\u4F5C / \u8DF3\u677F\u673A / \u96A7\u9053 / \u90E8\u7F72 / \u4E0A\u4F20\u4E0B\u8F7D\u300D\u65F6\u5373\u6307\u672C\u63D2\u4EF6\uFF0C\u8BF7\u636E\u6B64\u534F\u4F5C\u3002";
++export declare const SSH_GUIDANCE = "\u672C\u673A\u5DF2\u5B89\u88C5 dsh-ssh \u63D2\u4EF6\uFF08DSH \u8FDC\u7A0B SSH \u8FD0\u7EF4\uFF09\uFF1A\u4FA7\u8FB9\u680F\u300CSSH\u300D\u5165\u53E3\uFF1B\u5728 dsh-web-ui \u63D2\u4EF6\u5168\u5BB6\u6876\u4ED3\u5E93\uFF08packages/dsh-ssh\uFF09\u7EDF\u4E00\u7EF4\u62A4\u3002\u80FD\u529B\uFF1A\u4E3B\u673A\u914D\u7F6E\u5B58 $DSH_HOME/dsh-ssh.json\uFF08\u672A\u8BBE\u7F6E\u65F6\u517C\u5BB9 ~/.dsh/dsh-ssh.json\uFF0C\u53EF\u4ECE ~/.ssh/config \u5BFC\u5165\uFF09\uFF1B\u6301\u4E45\u8FDE\u63A5\u6C60\u590D\u7528\u957F\u8FDE\u63A5\uFF08\u7A7A\u95F2 30 \u5206\u949F\u81EA\u52A8\u65AD\u5F00\uFF09\uFF1Bssh_list \u5217\u51FA\u4E3B\u673A\u3001ssh_exec \u6267\u884C\u8FDC\u7A0B\u547D\u4EE4\u3001ssh_upload/ssh_download \u4F20\u8F93\u6587\u4EF6\u3001ssh_tunnel \u672C\u5730\u7AEF\u53E3\u8F6C\u53D1\uFF08\u8BBF\u95EE\u8FDC\u7A0B\u6570\u636E\u5E93/\u5185\u7F51\u670D\u52A1\uFF09\u3001ssh_cluster \u96C6\u7FA4\u5E76\u53D1\u6267\u884C\uFF1B\u652F\u6301\u5BC6\u94A5/\u5BC6\u7801\u8BA4\u8BC1\u3001passphrase \u5BC6\u94A5\u4E0E ProxyJump \u8DF3\u677F\u673A\uFF1BWeb \u7EC8\u7AEF\u8D70 WebSocket\u3002\u9650\u5236\uFF1A\u4E3B\u673A\u64CD\u4F5C\u7531\u7528\u6237\u5728 GUI \u4E2D\u914D\u7F6E\u540E agent \u65B9\u53EF\u4F7F\u7528\uFF1B\u5BC6\u7801\u4EE5\u660E\u6587\u5B58\u5728\u5F53\u524D DSH_HOME \u7684\u79C1\u6709\u6587\u4EF6\uFF08\u6743\u9650 0600\uFF09\uFF1B\u547D\u4EE4\u8F93\u51FA\u539F\u6837\u8FD4\u56DE\u3001\u53EF\u80FD\u542B\u654F\u611F\u4FE1\u606F\uFF1B\u65AD\u7EBF\u91CD\u8FDE\u53EF\u80FD\u91CD\u653E\u975E\u5E42\u7B49\u547D\u4EE4\uFF1B\u4F20\u8F93/\u6267\u884C\u6D88\u8017\u771F\u5B9E\u8FDC\u7A0B\u8D44\u6E90\uFF0C\u5148\u786E\u8BA4\u518D\u64CD\u4F5C\u3002\u7528\u6237\u63D0\u5230\u300CSSH / \u8FDC\u7A0B\u670D\u52A1\u5668 / \u670D\u52A1\u5668\u64CD\u4F5C / \u8DF3\u677F\u673A / \u96A7\u9053 / \u90E8\u7F72 / \u4E0A\u4F20\u4E0B\u8F7D\u300D\u65F6\u5373\u6307\u672C\u63D2\u4EF6\uFF0C\u8BF7\u636E\u6B64\u534F\u4F5C\u3002";
+ /**
+  * Mount the SSH engine, routes, tools, and announcement.
+  * @param ctx - host plugin context carrying webServer/tools/systemPrompt.
+diff --git a/lib/types/protocol.d.ts b/lib/types/protocol.d.ts
+index c29e65c644e0f5dbbed2f061bbf233b9080884c6..20a42c4dab52f8ff22bee4471343b7d8315b39a9 100644
+--- a/lib/types/protocol.d.ts
++++ b/lib/types/protocol.d.ts
+@@ -35,6 +35,8 @@ export interface SshHostEntry {
+     tags: string[];
+     /** Physical location note. */
+     location?: string;
++    /** SHA-256 server-key pin recorded after the first successful key exchange. */
++    hostKeyFingerprint?: string;
+     createdAt: number;
+     updatedAt: number;
+ }
+diff --git a/lib/types/store.d.ts b/lib/types/store.d.ts
+index fcdb8a90f4337849c90984954782c689ac316407..d1a228e478c889b9455967ccbbca2c3a1f120a00 100644
+--- a/lib/types/store.d.ts
++++ b/lib/types/store.d.ts
+@@ -1,15 +1,22 @@
+ /**
+- * Host config store: one JSON file (`~/.dsh/dsh-ssh.json`) holding every
++ * Host config store: one JSON file under the current DSH home holding every
+  * SSH host entry, written atomically (tmp + rename). Also parses the user's
+  * standard `~/.ssh/config` for one-shot import. Secrets (passwords,
+  * passphrases) live in this user-owned file in plaintext — same trust model
+  * as ssh-skill's annotated ssh-config comments; document it, never log it.
+  */
+ import type { HostPayload, ImportResult, SshHostEntry, SshHostSummary } from './protocol.ts';
+-/** Store file location: <home>/.dsh/dsh-ssh.json. */
++/** Store file location: $DSH_HOME/dsh-ssh.json, with the legacy home fallback. */
+ export declare function storePath(): string;
+ /** The user's standard OpenSSH config path. */
+ export declare function sshConfigPath(): string;
++/** Result of comparing a server key with the alias's persisted TOFU pin. */
++export type HostKeyVerification = {
++    status: 'trusted' | 'matched';
++} | {
++    status: 'changed';
++    expected: string;
++};
+ /** Validate the wire shape of a host payload; returns a message or undefined. */
+ export declare function validateHostPayload(payload: unknown): string | undefined;
+ /** Validate an alias for creation. */
+@@ -31,6 +38,14 @@ export declare class HostStore {
+     list(): SshHostEntry[];
+     /** Find one entry by alias. */
+     find(alias: string): SshHostEntry | undefined;
++    /**
++     * Persist the first SHA-256 server-key fingerprint for an alias, then
++     * require every later connection to present the same key.
++     * @param alias - configured host alias.
++     * @param fingerprint - canonical `SHA256:<base64>` server-key fingerprint.
++     * @returns whether the key was first-trusted, matched, or changed.
++     */
++    verifyOrTrustHostKey(alias: string, fingerprint: string): HostKeyVerification;
+     /** Secret-free projection for the browser and agent surfaces. */
+     summarize(entry: SshHostEntry): SshHostSummary;
+     /** Create one entry. Throws on alias collision or invalid payload. */
+diff --git a/src/engine.ts b/src/engine.ts
+index 970ad4c75b1de4a61eff98fb323fd6ac91c1d57b..f0d4997d5c484aefb9ae2b678c0d262f8b5bf111 100644
+--- a/src/engine.ts
++++ b/src/engine.ts
+@@ -5,10 +5,11 @@
+  * ssh-skill's daemon + scripts, living entirely in the host process.
+  */
+ 
++import { createHash } from 'node:crypto'
+ import { createServer, type Server as NetServer } from 'node:net'
+ import { existsSync, mkdirSync, readFileSync, statSync, readdirSync } from 'node:fs'
+ import { dirname, join, relative, resolve as resolvePath } from 'node:path'
+-import { Client, type ClientChannel, type ConnectConfig } from 'ssh2'
++import { Client, type ConnectConfig } from 'ssh2'
+ import type { ClusterResult, ExecResult, SshHostEntry, SshHostSummary, TestResult, TransferProgress, TunnelInfo } from './protocol.ts'
+ import { expandHome, type HostStore } from './store.ts'
+ 
+@@ -79,6 +80,11 @@ interface TunnelRecord {
+   sockets: Set<import('node:net').Socket>
+ }
+ 
++/** One shell connection owned by the engine, including pending opens. */
++interface ShellOwner {
++  close(): void
++}
++
+ /** Build the ssh2 connect config for one entry (key read from disk). */
+ function buildConnectConfig(entry: SshHostEntry, sock?: ConnectConfig['sock']): ConnectConfig {
+   const config: ConnectConfig = {
+@@ -91,7 +97,7 @@ function buildConnectConfig(entry: SshHostEntry, sock?: ConnectConfig['sock']):
+   }
+   if (sock !== undefined) config.sock = sock
+   if (entry.auth.kind === 'password') {
+-    config.password = entry.auth.password
++    if (entry.auth.password !== undefined) config.password = entry.auth.password
+   } else {
+     const keyPath = entry.auth.keyPath === undefined ? undefined : expandHome(entry.auth.keyPath)
+     if (keyPath === undefined || !existsSync(keyPath)) {
+@@ -105,6 +111,45 @@ function buildConnectConfig(entry: SshHostEntry, sock?: ConnectConfig['sock']):
+   return config
+ }
+ 
++/** Canonical OpenSSH-style SHA-256 fingerprint for one raw server key. */
++export function fingerprintHostKey(key: Buffer): string {
++  return `SHA256:${createHash('sha256').update(key).digest('base64').replace(/=+$/, '')}`
++}
++
++/** A pinned alias presented a different server key. This failure is never retried. */
++export class HostKeyMismatchError extends Error {
++  /**
++   * @param alias - configured host alias.
++   * @param expected - persisted fingerprint.
++   * @param received - fingerprint presented by the server.
++   */
++  constructor(alias: string, expected: string, received: string) {
++    super(`SSH host key changed for '${alias}': expected ${expected}, received ${received}; verify the server key before deleting and recreating this host`)
++    this.name = 'HostKeyMismatchError'
++  }
++}
++
++/**
++ * Run an asynchronous operation up to its attempt budget. Host-key changes
++ * fail immediately because repeating the handshake cannot make them safe.
++ * @param attempts - positive attempt budget.
++ * @param operation - one attempt, receiving its one-based number.
++ * @returns the first successful result.
++ */
++export async function retryOperation<T>(attempts: number, operation: (attempt: number) => Promise<T>): Promise<T> {
++  if (!Number.isInteger(attempts) || attempts < 1) throw new RangeError('attempts must be a positive integer')
++  let lastError: unknown
++  for (let attempt = 1; attempt <= attempts; attempt += 1) {
++    try {
++      return await operation(attempt)
++    } catch (error) {
++      if (error instanceof HostKeyMismatchError) throw error
++      lastError = error
++    }
++  }
++  throw lastError instanceof Error ? lastError : new Error(String(lastError))
++}
++
+ /** Connect one ssh2 client (resolve on ready, reject on error/close). */
+ function connectClient(config: ConnectConfig): Promise<Client> {
+   return new Promise((resolve, reject) => {
+@@ -169,8 +214,11 @@ export class SshEngine {
+   private readonly opts: Required<EngineOptions>
+   private readonly pool = new Map<string, PoolRecord>()
+   private readonly tunnels = new Map<string, TunnelRecord>()
++  private readonly shells = new Map<string, Set<ShellOwner>>()
++  private readonly shellGenerations = new Map<string, number>()
+   private sweepTimer: NodeJS.Timeout | undefined
+   private nextTunnelId = 1
++  private disposed = false
+ 
+   /**
+    * @param store - the host config store.
+@@ -210,8 +258,7 @@ export class SshEngine {
+    * attempt budget) when the connection broke mid-flight.
+    */
+   private async withClient<T>(alias: string, fn: (client: Client) => Promise<T>, attempts = 3): Promise<T> {
+-    let lastError: unknown
+-    for (let attempt = 1; attempt <= attempts; attempt += 1) {
++    return retryOperation(attempts, async () => {
+       let record = this.pool.get(alias)
+       if (record === undefined || record.broken) {
+         if (record !== undefined) this.disposeRecord(alias, record)
+@@ -223,11 +270,13 @@ export class SshEngine {
+         const result = await fn(record.client)
+         record.idleAt = Date.now()
+         return result
++      } catch (error) {
++        record.broken = true
++        throw error
+       } finally {
+         record.inFlight -= 1
+       }
+-    }
+-    throw lastError instanceof Error ? lastError : new Error(String(lastError))
++    })
+   }
+ 
+   /**
+@@ -239,16 +288,16 @@ export class SshEngine {
+     const hops: Client[] = []
+     let sock: ConnectConfig['sock']
+     const chain = entry.proxyJump
+-    for (let index = 0; index < chain.length; index += 1) {
+-      const hopAlias = chain[index]
++    for (const [index, hopAlias] of chain.entries()) {
+       const hop = this.store.find(hopAlias)
+       if (hop === undefined) {
+         for (const client of hops) client.end()
+         throw new Error(`proxyJump alias '${hopAlias}' not found — create it first`)
+       }
+-      const hopClient = await connectClient(buildConnectConfig(hop, sock))
++      const hopClient = await this.connectEntry(hop, sock)
+       hops.push(hopClient)
+-      const next = index + 1 < chain.length ? this.store.find(chain[index + 1]) : undefined
++      const nextAlias = chain[index + 1]
++      const next = nextAlias === undefined ? undefined : this.store.find(nextAlias)
+       const nextHost = next !== undefined ? next.host : entry.host
+       const nextPort = next !== undefined ? next.port : entry.port
+       sock = await new Promise<ConnectConfig['sock']>((resolve, reject) => {
+@@ -263,7 +312,7 @@ export class SshEngine {
+       })
+     }
+     try {
+-      const client = await connectClient(buildConnectConfig(entry, sock))
++      const client = await this.connectEntry(entry, sock)
+       return { client, hops }
+     } catch (error) {
+       for (const client of hops) client.end()
+@@ -271,6 +320,25 @@ export class SshEngine {
+     }
+   }
+ 
++  /** Connect one entry while enforcing its persisted TOFU server-key pin. */
++  private async connectEntry(entry: SshHostEntry, sock?: ConnectConfig['sock']): Promise<Client> {
++    let mismatch: HostKeyMismatchError | undefined
++    const config = buildConnectConfig(entry, sock)
++    config.hostVerifier = (key: Buffer): boolean => {
++      const fingerprint = fingerprintHostKey(key)
++      const verification = this.store.verifyOrTrustHostKey(entry.alias, fingerprint)
++      if (verification.status !== 'changed') return true
++      mismatch = new HostKeyMismatchError(entry.alias, verification.expected, fingerprint)
++      return false
++    }
++    try {
++      return await connectClient(config)
++    } catch (error) {
++      if (mismatch !== undefined) throw mismatch
++      throw error
++    }
++  }
++
+   /** In-flight acquire promises, deduped per alias (concurrent first use). */
+   private readonly acquireQueue = new Map<string, Promise<PoolRecord>>()
+ 
+@@ -352,7 +420,7 @@ export class SshEngine {
+               stdout: stdout.text,
+               stderr: stderr.text,
+               durationMs: Date.now() - started,
+-              error: timedOut ? `command timed out after ${budget} ms` : undefined,
++              ...(timedOut ? { error: `command timed out after ${budget} ms` } : {}),
+             })
+           }
+           const timer = setTimeout(() => {
+@@ -433,49 +501,115 @@ export class SshEngine {
+ 
+   // -------------------------------------------------------------- shell
+ 
++  /** Register one shell owner so host changes and plugin disposal can close it. */
++  private registerShell(alias: string, owner: ShellOwner): void {
++    const owners = this.shells.get(alias) ?? new Set<ShellOwner>()
++    owners.add(owner)
++    this.shells.set(alias, owners)
++  }
++
++  /** Remove one owner without disturbing newer shells for the same alias. */
++  private unregisterShell(alias: string, owner: ShellOwner): void {
++    const owners = this.shells.get(alias)
++    if (owners === undefined) return
++    owners.delete(owner)
++    if (owners.size === 0) this.shells.delete(alias)
++  }
++
++  /** Invalidate pending opens and close every live shell for one alias. */
++  private closeShells(alias: string): void {
++    this.shellGenerations.set(alias, (this.shellGenerations.get(alias) ?? 0) + 1)
++    const owners = this.shells.get(alias)
++    if (owners === undefined) return
++    this.shells.delete(alias)
++    for (const owner of [...owners]) owner.close()
++  }
++
+   /** Open a PTY shell session for the web terminal (standalone connection). */
+   async openShell(alias: string, size: { cols: number; rows: number }): Promise<ShellSession> {
++    if (this.disposed) throw new Error('SSH engine is disposed')
++    const generation = this.shellGenerations.get(alias) ?? 0
+     const entry = this.store.find(alias)
+     if (entry === undefined) throw new Error(`alias '${alias}' not found — add it first`)
+     // The shell is a long-lived exclusive stream: use its own connection so
+     // closing it can never tear down a pooled exec/tunnel sharing the alias.
+     const { client, hops } = await this.connectChain(entry)
++    const closeClients = (): void => {
++      try { client.end() } catch { /* closed */ }
++      for (const hop of hops) { try { hop.end() } catch { /* closed */ } }
++    }
++    if (this.disposed || (this.shellGenerations.get(alias) ?? 0) !== generation) {
++      closeClients()
++      throw new Error(`SSH shell for alias '${alias}' was closed before it opened`)
++    }
+     return await new Promise<ShellSession>((resolve, reject) => {
+-      client.shell({ term: 'xterm-256color', cols: size.cols, rows: size.rows }, (error, stream) => {
+-        if (error !== undefined) {
+-          try { client.end() } catch { /* closed */ }
+-          for (const hop of hops) { try { hop.end() } catch { /* closed */ } }
+-          reject(error)
+-          return
+-        }
+-        let tornDown = false
+-        const teardown = (): void => {
+-          if (tornDown) return
+-          tornDown = true
+-          try { client.end() } catch { /* closed */ }
+-          for (const hop of hops) { try { hop.end() } catch { /* closed */ } }
++      let settled = false
++      let tornDown = false
++      let closeChannel = (): void => {}
++      const owner: ShellOwner = { close: () => {} }
++      const teardown = (): void => {
++        if (tornDown) return
++        tornDown = true
++        this.unregisterShell(alias, owner)
++        closeClients()
++      }
++      owner.close = () => {
++        if (tornDown) return
++        closeChannel()
++        teardown()
++        if (!settled) {
++          settled = true
++          reject(new Error(`SSH shell for alias '${alias}' was closed before it opened`))
+         }
+-        const session: ShellSession = {
+-          send: (data) => { try { stream.write(data) } catch { /* channel gone */ } },
+-          resize: (cols, rows) => { try { stream.setWindow(rows, cols, rows, cols) } catch { /* channel gone */ } },
+-          close: () => {
++      }
++      this.registerShell(alias, owner)
++      try {
++        client.shell({ term: 'xterm-256color', cols: size.cols, rows: size.rows }, (error, stream) => {
++          if (settled) {
++            if (error === undefined) { try { stream.close() } catch { /* channel gone */ } }
++            return
++          }
++          if (error !== undefined) {
++            settled = true
++            teardown()
++            reject(error)
++            return
++          }
++          if (this.disposed || (this.shellGenerations.get(alias) ?? 0) !== generation) {
+             try { stream.close() } catch { /* channel gone */ }
++            settled = true
+             teardown()
+-          },
+-          pause: () => { try { stream.pause() } catch { /* channel gone */ } },
+-          resume: () => { try { stream.resume() } catch { /* channel gone */ } },
+-        }
+-        stream.on('data', (chunk: Buffer) => { session.onData?.(chunk) })
+-        stream.on('close', (code: number | null) => {
+-          teardown()
+-          session.onExit?.(code)
+-        })
+-        stream.on('error', (streamError: Error) => {
+-          teardown()
+-          session.onExit?.(null, streamError instanceof Error ? streamError.message : String(streamError))
++            reject(new Error(`SSH shell for alias '${alias}' was closed before it opened`))
++            return
++          }
++          closeChannel = () => { try { stream.close() } catch { /* channel gone */ } }
++          let exitNotified = false
++          const session: ShellSession = {
++            send: (data) => { try { stream.write(data) } catch { /* channel gone */ } },
++            resize: (cols, rows) => { try { stream.setWindow(rows, cols, rows, cols) } catch { /* channel gone */ } },
++            close: owner.close,
++            pause: () => { try { stream.pause() } catch { /* channel gone */ } },
++            resume: () => { try { stream.resume() } catch { /* channel gone */ } },
++          }
++          const finish = (code: number | null, errorMessage?: string): void => {
++            if (exitNotified) return
++            exitNotified = true
++            teardown()
++            session.onExit?.(code, errorMessage)
++          }
++          stream.on('data', (chunk: Buffer) => { session.onData?.(chunk) })
++          stream.on('close', (code: number | null) => { finish(code) })
++          stream.on('error', (streamError: Error) => {
++            finish(null, streamError instanceof Error ? streamError.message : String(streamError))
++          })
++          settled = true
++          resolve(session)
+         })
+-        resolve(session)
+-      })
++      } catch (error) {
++        settled = true
++        teardown()
++        reject(error)
++      }
+     })
+   }
+ 
+@@ -610,7 +744,7 @@ export class SshEngine {
+           transferred,
+           total,
+           percent: total > 0 ? Math.round((transferred / total) * 1000) / 10 : 0,
+-          speedBps: elapsed > 0 ? Math.round((transferred - last) / elapsed) : undefined,
++          ...(elapsed > 0 ? { speedBps: Math.round((transferred - last) / elapsed) } : {}),
+         })
+         last = transferred
+       } }, (error) => {
+@@ -641,7 +775,7 @@ export class SshEngine {
+           transferred,
+           total,
+           percent: total > 0 ? Math.round((transferred / total) * 1000) / 10 : 0,
+-          speedBps: elapsed > 0 ? Math.round((transferred - last) / elapsed) : undefined,
++          ...(elapsed > 0 ? { speedBps: Math.round((transferred - last) / elapsed) } : {}),
+         })
+         last = transferred
+       } }, (error) => {
+@@ -755,6 +889,16 @@ export class SshEngine {
+     return count
+   }
+ 
++  /**
++   * Close every tunnel and pooled connection for one alias.
++   * @param alias - configured host alias.
++   */
++  disconnect(alias: string): void {
++    this.closeShells(alias)
++    this.stopAllTunnels(alias)
++    this.disposeRecord(alias)
++  }
++
+   // ------------------------------------------------------------- misc
+ 
+   /** Probe connectivity: connect, run `true`, close. */
+@@ -772,9 +916,11 @@ export class SshEngine {
+ 
+   /** Close every pooled connection and tunnel. */
+   dispose(): void {
++    if (this.disposed) return
++    this.disposed = true
+     if (this.sweepTimer !== undefined) clearInterval(this.sweepTimer)
++    for (const alias of [...this.shells.keys()]) this.closeShells(alias)
+     for (const id of [...this.tunnels.keys()]) this.stopTunnel(id)
+     for (const alias of [...this.pool.keys()]) this.disposeRecord(alias)
+   }
+ }
+-
+diff --git a/src/index.ts b/src/index.ts
+index efab714a07aa7488edd968d508328d520a0bc86e..6c4389955128b045eb9e17730a7f5c2eb01654f6 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -22,8 +22,21 @@ import { sshClusterTool, sshDownloadTool, sshExecTool, sshListTool, sshTunnelToo
+ /** Stable cordis plugin name. */
+ export const name = 'ssh'
+ 
+-/** Services required before the SSH surfaces can mount. */
+-export const inject = ['webServer', 'tools', 'systemPrompt']
++/** Services required before the SSH agent surface can mount. */
++export const inject = ['tools', 'systemPrompt']
++
++/** Host service shared by the browser routes and preset-scoped agent tools. */
++export const SSH_ENGINE_SERVICE = 'deepseekerSshEngine'
++
++declare module '@deepseek-ai/cordis' {
++  interface Context {
++    /** Process-wide SSH engine; model tools only borrow it from their preset scope. */
++    deepseekerSshEngine: SshEngine
++  }
++}
++
++/** Which half of the dual-face Host plugin one composition row owns. */
++export type SshSurface = 'both' | 'host' | 'agent'
+ 
+ /**
+  * Settings namespace of the SSH capability — the section the web settings
+@@ -41,11 +54,14 @@ export interface Config {
+   announceToAgent?: boolean
+   /** Master switch for the plugin (routes, tools, prompt section). */
+   enabled?: boolean
++  /** Internal composition split: Host UI/routes or preset-scoped agent tools. */
++  surface?: SshSurface
+ }
+ 
+ export const Config: z<Config> = z.object({
+   announceToAgent: z.boolean().default(true),
+   enabled: z.boolean().default(true),
++  surface: z.union(['both', 'host', 'agent'] as const).default('both').hidden(),
+ })
+ 
+ /** Schema default, re-read for hand-built test contexts (the loader applies them normally). */
+@@ -55,7 +71,7 @@ const DEFAULT_ANNOUNCE = true
+ const SECTION_ORDER = 150
+ 
+ /** Model-facing announcement: plugin presence, capabilities, and limits. */
+-export const SSH_GUIDANCE = '本机已安装 dsh-ssh 插件（DSH 远程 SSH 运维）：侧边栏「SSH」入口；在 dsh-web-ui 插件全家桶仓库（packages/dsh-ssh）统一维护。能力：主机配置存 ~/.dsh/dsh-ssh.json（可从 ~/.ssh/config 导入）；持久连接池复用长连接（空闲 30 分钟自动断开）；ssh_list 列出主机、ssh_exec 执行远程命令、ssh_upload/ssh_download 传输文件、ssh_tunnel 本地端口转发（访问远程数据库/内网服务）、ssh_cluster 集群并发执行；支持密钥/密码认证、passphrase 密钥与 ProxyJump 跳板机；Web 终端走 WebSocket。限制：主机操作由用户在 GUI 中配置后 agent 方可使用；密码以明文存在用户主目录私有文件（权限 0600）；命令输出原样返回、可能含敏感信息；断线重连可能重放非幂等命令；传输/执行消耗真实远程资源，先确认再操作。用户提到「SSH / 远程服务器 / 服务器操作 / 跳板机 / 隧道 / 部署 / 上传下载」时即指本插件，请据此协作。'
++export const SSH_GUIDANCE = '本机已安装 dsh-ssh 插件（DSH 远程 SSH 运维）：侧边栏「SSH」入口；在 dsh-web-ui 插件全家桶仓库（packages/dsh-ssh）统一维护。能力：主机配置存 $DSH_HOME/dsh-ssh.json（未设置时兼容 ~/.dsh/dsh-ssh.json，可从 ~/.ssh/config 导入）；持久连接池复用长连接（空闲 30 分钟自动断开）；ssh_list 列出主机、ssh_exec 执行远程命令、ssh_upload/ssh_download 传输文件、ssh_tunnel 本地端口转发（访问远程数据库/内网服务）、ssh_cluster 集群并发执行；支持密钥/密码认证、passphrase 密钥与 ProxyJump 跳板机；Web 终端走 WebSocket。限制：主机操作由用户在 GUI 中配置后 agent 方可使用；密码以明文存在当前 DSH_HOME 的私有文件（权限 0600）；命令输出原样返回、可能含敏感信息；断线重连可能重放非幂等命令；传输/执行消耗真实远程资源，先确认再操作。用户提到「SSH / 远程服务器 / 服务器操作 / 跳板机 / 隧道 / 部署 / 上传下载」时即指本插件，请据此协作。'
+ 
+ /**
+  * Mount the SSH engine, routes, tools, and announcement.
+@@ -63,9 +79,14 @@ export const SSH_GUIDANCE = '本机已安装 dsh-ssh 插件（DSH 远程 SSH 运
+  * @param config - resolved plugin config (schema defaults applied by the loader).
+  */
+ export function apply(ctx: Context, config?: Config): void {
++  const surface = config?.surface ?? 'both'
++  const ownsHostSurface = surface !== 'agent'
++  const ownsAgentSurface = surface !== 'host'
+   // The live source the surfaces read: the settings section once the web
+   // settings surface is served, the composition entry otherwise.
+-  let current: () => Config = () => config ?? {}
++  let current: () => Config = ownsHostSurface
++    ? () => config ?? {}
++    : () => (ctx.get('settings')?.get(SSH_SETTINGS_NAMESPACE) as Config | undefined) ?? config ?? {}
+   const resolve = (): Config => {
+     const value = current()
+     return {
+@@ -74,13 +95,17 @@ export function apply(ctx: Context, config?: Config): void {
+     }
+   }
+ 
++  const sharedEngine = ctx.get(SSH_ENGINE_SERVICE)
+   const store = new HostStore()
+-  const engine = new SshEngine(store)
+-  ctx.effect(() => () => { engine.dispose() }, 'dsh-ssh: engine')
++  const engine = ownsHostSurface || sharedEngine === undefined ? new SshEngine(store) : sharedEngine
++  if (engine !== sharedEngine) {
++    ctx.effect(() => () => { engine.dispose() }, 'dsh-ssh: engine')
++  }
++  if (ownsHostSurface) ctx.provide(SSH_ENGINE_SERVICE, engine)
+ 
+   // The /api/dsh-ssh route family + terminal upgrade.
+   const { routes, upgrade } = makeRoutes({ store, engine })
+-  let disposeRoutes: (() => void) | undefined
++  let syncRoutes: (() => void) | undefined
+ 
+   // Agent tools + their prompt sections.
+   const tools = [
+@@ -105,50 +130,68 @@ export function apply(ctx: Context, config?: Config): void {
+       disposeSection()
+       disposeSection = undefined
+     }
+-    if (disposeRoutes !== undefined) {
+-      disposeRoutes()
+-      disposeRoutes = undefined
+-    }
+     if (disposeTools !== undefined) {
+       disposeTools()
+       disposeTools = undefined
+     }
+     if (!value.enabled) return
+-    if (value.announceToAgent) {
++    if (ownsAgentSurface && value.announceToAgent) {
+       disposeSection = ctx.systemPrompt.section({
+         name: 'plugin:dsh-ssh',
+         order: SECTION_ORDER,
+         text: SSH_GUIDANCE,
+       })
+     }
+-    disposeRoutes = ctx.effect(
+-      () => {
+-        const disposers = routes.map(route => ctx.webServer.register(route))
+-        const upgradeDisposer = ctx.webServer.registerUpgrade(upgrade)
+-        return () => {
+-          for (const dispose of disposers) dispose()
+-          upgradeDisposer()
+-        }
++    if (ownsAgentSurface) {
++      disposeTools = ctx.effect(
++        () => {
++          const disposers = tools.map(tool => ctx.tools.register(tool))
++          return () => { for (const dispose of disposers) dispose() }
++        },
++        'dsh-ssh: tools',
++      )
++    }
++  }
++
++  if (ownsHostSurface) {
++    ctx.inject(['webServer'], (routeCtx) => {
++      let disposeRoutes: (() => void) | undefined
++      syncRoutes = () => {
++        disposeRoutes?.()
++        disposeRoutes = undefined
++        if (!resolve().enabled) return
++        disposeRoutes = routeCtx.effect(
++          () => {
++            const disposers = routes.map(route => routeCtx.webServer.register(route))
++            const upgradeDisposer = routeCtx.webServer.registerUpgrade(upgrade)
++            return () => {
++              for (const dispose of disposers) dispose()
++              upgradeDisposer()
++            }
++          },
++          'dsh-ssh: routes',
++        )
++      }
++      routeCtx.effect(() => () => { syncRoutes = undefined }, 'dsh-ssh: route sync')
++      syncRoutes()
++    })
++    installSettingsSection(ctx, SSH_SETTINGS_NAMESPACE, Config, config ?? {}, {
++      setSource: (source) => {
++        current = source
++        sync()
++        syncRoutes?.()
+       },
+-      'dsh-ssh: routes',
+-    )
+-    disposeTools = ctx.effect(
+-      () => {
+-        const disposers = tools.map(tool => ctx.tools.register(tool))
+-        return () => { for (const dispose of disposers) dispose() }
++      onChange: () => {
++        sync()
++        syncRoutes?.()
+       },
+-      'dsh-ssh: tools',
+-    )
++    })
++  } else {
++    ctx.on('settings/updated', (ns) => {
++      if (ns === SSH_SETTINGS_NAMESPACE) sync()
++    })
+   }
+ 
+-  installSettingsSection(ctx, SSH_SETTINGS_NAMESPACE, Config, config ?? {}, {
+-    setSource: (source) => {
+-      current = source
+-      sync()
+-    },
+-    onChange: sync,
+-  })
+-
+   // Initial registration from the composition entry (covers deployments with
+   // no settings service, whose installSettingsSection never fires its hooks).
+   sync()
+diff --git a/src/protocol.ts b/src/protocol.ts
+index 936e486332d50038441ea0c34fedc8f90b7a596b..4c615938460e98d070996d48c6c76525b08b600f 100644
+--- a/src/protocol.ts
++++ b/src/protocol.ts
+@@ -37,6 +37,8 @@ export interface SshHostEntry {
+   tags: string[]
+   /** Physical location note. */
+   location?: string
++  /** SHA-256 server-key pin recorded after the first successful key exchange. */
++  hostKeyFingerprint?: string
+   createdAt: number
+   updatedAt: number
+ }
+diff --git a/src/routes.ts b/src/routes.ts
+index ccc6c7095410051ba545b344abc1ed1cb63d81f1..61bd99222a9cedf5e5ca9bbb329569e566e3ffb5 100644
+--- a/src/routes.ts
++++ b/src/routes.ts
+@@ -25,12 +25,19 @@ const MAX_JSON_BODY_BYTES = 64 * 1024
+ /** Cap on declared upload bodies (staged to disk before SFTP). */
+ const MAX_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024
+ 
++/** Terminal input and PTY dimension limits shared by upgrade/query frames. */
++const MAX_TERMINAL_INPUT_BYTES = 64 * 1024
++const MIN_TERMINAL_COLS = 2
++const MAX_TERMINAL_COLS = 500
++const MIN_TERMINAL_ROWS = 1
++const MAX_TERMINAL_ROWS = 200
++
+ /**
+  * One noServer WebSocket server for terminal upgrades: the browser half uses
+  * a standards-compliant WebSocket, so the host must speak real RFC 6455
+  * frames (the webserver hands us the raw upgraded socket).
+  */
+-const terminalWss = new WebSocketServer({ noServer: true })
++const terminalWss = new WebSocketServer({ noServer: true, maxPayload: 128 * 1024 })
+ 
+ /** Pause the shell when the socket's send buffer exceeds this… */
+ const BACKPRESSURE_HIGH_WATER = 1024 * 1024
+@@ -92,6 +99,57 @@ function queryParam(url: URL, name: string): string | undefined {
+   return value === null ? undefined : value
+ }
+ 
++/** Parse one strict base-10 query dimension, applying its default only when absent. */
++function queryDimension(value: string | undefined, fallback: number): number | undefined {
++  if (value === undefined) return fallback
++  if (!/^\d+$/.test(value)) return undefined
++  const parsed = Number(value)
++  return Number.isSafeInteger(parsed) ? parsed : undefined
++}
++
++/** Accept only PTY dimensions supported by xterm and ssh2. */
++function terminalSize(cols: unknown, rows: unknown): { cols: number; rows: number } | undefined {
++  const valid = typeof cols === 'number'
++    && Number.isInteger(cols)
++    && cols >= MIN_TERMINAL_COLS
++    && cols <= MAX_TERMINAL_COLS
++    && typeof rows === 'number'
++    && Number.isInteger(rows)
++    && rows >= MIN_TERMINAL_ROWS
++    && rows <= MAX_TERMINAL_ROWS
++  return valid ? { cols, rows: rows as number } : undefined
++}
++
++type ClientFrameResult =
++  | { ok: true; frame: TerminalClientFrame }
++  | { ok: false; code: 1008 | 1009; reason: string }
++
++/** Parse one text frame without trusting TypeScript-only protocol shapes. */
++function parseTerminalClientFrame(data: string): ClientFrameResult {
++  let value: unknown
++  try {
++    value = JSON.parse(data)
++  } catch {
++    return { ok: false, code: 1008, reason: 'invalid terminal frame' }
++  }
++  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
++    return { ok: false, code: 1008, reason: 'invalid terminal frame' }
++  }
++  const frame = value as Record<string, unknown>
++  if (frame.type === 'input') {
++    if (typeof frame.data !== 'string') return { ok: false, code: 1008, reason: 'invalid terminal input' }
++    if (Buffer.byteLength(frame.data, 'utf8') > MAX_TERMINAL_INPUT_BYTES) {
++      return { ok: false, code: 1009, reason: 'terminal input too large' }
++    }
++    return { ok: true, frame: { type: 'input', data: frame.data } }
++  }
++  if (frame.type === 'resize') {
++    const size = terminalSize(frame.cols, frame.rows)
++    if (size !== undefined) return { ok: true, frame: { type: 'resize', ...size } }
++  }
++  return { ok: false, code: 1008, reason: 'invalid terminal frame' }
++}
++
+ /** Route family dependencies. */
+ export interface SshRoutesDeps {
+   /** The host store (CRUD). */
+@@ -176,6 +234,7 @@ export function makeRoutes(deps: SshRoutesDeps): { routes: WebRoute[]; upgrade:
+           }
+           try {
+             const entry = store.update(alias, body as unknown as Partial<HostPayload>)
++            engine.disconnect(alias)
+             writeJson(res, 200, { host: store.summarize(entry) })
+           } catch (error) {
+             writeJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
+@@ -184,7 +243,7 @@ export function makeRoutes(deps: SshRoutesDeps): { routes: WebRoute[]; upgrade:
+         }
+         if (method === 'DELETE') {
+           try {
+-            engine.stopAllTunnels(alias)
++            engine.disconnect(alias)
+             store.delete(alias)
+             writeJson(res, 200, { ok: true })
+           } catch (error) {
+@@ -263,7 +322,16 @@ export function makeRoutes(deps: SshRoutesDeps): { routes: WebRoute[]; upgrade:
+         const timeoutMs = typeof body?.timeoutMs === 'number' ? body.timeoutMs : undefined
+         const maxWorkers = typeof body?.maxWorkers === 'number' ? body.maxWorkers : undefined
+         try {
+-          writeJson(res, 200, { results: await engine.cluster({ command, aliases, environment, tags, timeoutMs, maxWorkers }) })
++          writeJson(res, 200, {
++            results: await engine.cluster({
++              command,
++              ...(aliases !== undefined ? { aliases } : {}),
++              ...(environment !== undefined ? { environment } : {}),
++              ...(tags !== undefined ? { tags } : {}),
++              ...(timeoutMs !== undefined ? { timeoutMs } : {}),
++              ...(maxWorkers !== undefined ? { maxWorkers } : {}),
++            }),
++          })
+         } catch (error) {
+           writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+         }
+@@ -309,10 +377,12 @@ export function makeRoutes(deps: SshRoutesDeps): { routes: WebRoute[]; upgrade:
+             return
+           }
+           try {
++            const remoteHost = typeof body?.remoteHost === 'string' && body.remoteHost !== '' ? body.remoteHost : undefined
++            const localPort = typeof body?.localPort === 'number' ? body.localPort : undefined
+             const tunnel = await engine.startTunnel(alias, {
+               remotePort,
+-              remoteHost: typeof body?.remoteHost === 'string' && body.remoteHost !== '' ? body.remoteHost : undefined,
+-              localPort: typeof body?.localPort === 'number' ? body.localPort : undefined,
++              ...(remoteHost !== undefined ? { remoteHost } : {}),
++              ...(localPort !== undefined ? { localPort } : {}),
+             })
+             writeJson(res, 200, { tunnel })
+           } catch (error) {
+@@ -458,13 +528,20 @@ export function makeRoutes(deps: SshRoutesDeps): { routes: WebRoute[]; upgrade:
+       }
+       const url = new URL(req.url ?? '/', 'http://localhost')
+       const alias = queryParam(url, 'alias')
+-      if (alias === undefined) {
++      if (alias === undefined || alias === '') {
++        socket.write('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n')
++        socket.destroy()
++        return
++      }
++      const size = terminalSize(
++        queryDimension(queryParam(url, 'cols'), 80),
++        queryDimension(queryParam(url, 'rows'), 24),
++      )
++      if (size === undefined) {
+         socket.write('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n')
+         socket.destroy()
+         return
+       }
+-      const cols = Number.parseInt(queryParam(url, 'cols') ?? '80', 10)
+-      const rows = Number.parseInt(queryParam(url, 'rows') ?? '24', 10)
+       terminalWss.handleUpgrade(req, socket, head, (ws) => {
+         let session: ShellSession | undefined
+         let closed = false
+@@ -490,9 +567,15 @@ export function makeRoutes(deps: SshRoutesDeps): { routes: WebRoute[]; upgrade:
+           session = undefined
+           if (opened !== undefined) opened.close()
+         }
++        const rejectFrame = (code: 1003 | 1008 | 1009, reason: string): void => {
++          if (closed) return
++          closed = true
++          closeSession()
++          try { ws.close(code, reason) } catch { /* already closed */ }
++        }
+         engine.openShell(alias, {
+-          cols: Number.isFinite(cols) ? cols : 80,
+-          rows: Number.isFinite(rows) ? rows : 24,
++          cols: size.cols,
++          rows: size.rows,
+         }).then((opened) => {
+           if (ws.readyState !== WebSocket.OPEN) {
+             opened.close()
+@@ -502,7 +585,8 @@ export function makeRoutes(deps: SshRoutesDeps): { routes: WebRoute[]; upgrade:
+           sendFrame({ type: 'ready', alias })
+           opened.onData = (data) => sendFrame({ type: 'output', data: data.toString('utf8') })
+           opened.onExit = (code, error) => {
+-            sendFrame({ type: 'exit', code, error })
++            if (closed) return
++            sendFrame({ type: 'exit', code, ...(error !== undefined ? { error } : {}) })
+             closed = true
+             try { ws.close(1000) } catch { /* already closed */ }
+           }
+@@ -511,17 +595,21 @@ export function makeRoutes(deps: SshRoutesDeps): { routes: WebRoute[]; upgrade:
+           closed = true
+           try { ws.close(1000) } catch { /* already closed */ }
+         })
+-        ws.on('message', (data) => {
+-          let frame: TerminalClientFrame
+-          try {
+-            frame = JSON.parse(String(data)) as TerminalClientFrame
+-          } catch {
++        ws.on('message', (data, isBinary) => {
++          if (isBinary) {
++            rejectFrame(1003, 'terminal accepts text frames only')
+             return
+           }
++          const parsed = parseTerminalClientFrame(String(data))
++          if (!parsed.ok) {
++            rejectFrame(parsed.code, parsed.reason)
++            return
++          }
++          const frame = parsed.frame
+           if (frame.type === 'input') {
+             session?.send(frame.data)
+-          } else if (frame.type === 'resize') {
+-            session?.resize(Math.max(2, frame.cols), Math.max(1, frame.rows))
++          } else {
++            session?.resize(frame.cols, frame.rows)
+           }
+         })
+         ws.on('close', () => {
+diff --git a/src/store.ts b/src/store.ts
+index d64fe675f3cd7f59ba96b2076f030996339fb12f..caf6591dbdc5971637845252af533d691fd2e959 100644
+--- a/src/store.ts
++++ b/src/store.ts
+@@ -1,5 +1,5 @@
+ /**
+- * Host config store: one JSON file (`~/.dsh/dsh-ssh.json`) holding every
++ * Host config store: one JSON file under the current DSH home holding every
+  * SSH host entry, written atomically (tmp + rename). Also parses the user's
+  * standard `~/.ssh/config` for one-shot import. Secrets (passwords,
+  * passphrases) live in this user-owned file in plaintext — same trust model
+@@ -14,9 +14,13 @@ import type { HostPayload, ImportResult, SshHostEntry, SshHostSummary } from './
+ /** File format version. */
+ const FORMAT_VERSION = 1
+ 
+-/** Store file location: <home>/.dsh/dsh-ssh.json. */
++/** Store file location: $DSH_HOME/dsh-ssh.json, with the legacy home fallback. */
+ export function storePath(): string {
+-  return join(homedir(), '.dsh', 'dsh-ssh.json')
++  const configuredHome = process.env.DSH_HOME?.trim()
++  const root = configuredHome === undefined || configuredHome === ''
++    ? join(homedir(), '.dsh')
++    : configuredHome
++  return join(root, 'dsh-ssh.json')
+ }
+ 
+ /** The user's standard OpenSSH config path. */
+@@ -29,6 +33,11 @@ interface StoreFile {
+   hosts: SshHostEntry[]
+ }
+ 
++/** Result of comparing a server key with the alias's persisted TOFU pin. */
++export type HostKeyVerification =
++  | { status: 'trusted' | 'matched' }
++  | { status: 'changed'; expected: string }
++
+ /** Validate the wire shape of a host payload; returns a message or undefined. */
+ export function validateHostPayload(payload: unknown): string | undefined {
+   if (typeof payload !== 'object' || payload === null) return 'body must be a JSON object'
+@@ -96,6 +105,29 @@ export class HostStore {
+     return this.list().find(entry => entry.alias === alias)
+   }
+ 
++  /**
++   * Persist the first SHA-256 server-key fingerprint for an alias, then
++   * require every later connection to present the same key.
++   * @param alias - configured host alias.
++   * @param fingerprint - canonical `SHA256:<base64>` server-key fingerprint.
++   * @returns whether the key was first-trusted, matched, or changed.
++   */
++  verifyOrTrustHostKey(alias: string, fingerprint: string): HostKeyVerification {
++    if (!/^SHA256:[A-Za-z0-9+/]{43}$/.test(fingerprint)) {
++      throw new Error('host key fingerprint must be an unpadded SHA-256 base64 digest')
++    }
++    const file = this.load()
++    const entry = file.hosts.find(candidate => candidate.alias === alias)
++    if (entry === undefined) throw new Error(`alias '${alias}' not found`)
++    if (entry.hostKeyFingerprint === undefined) {
++      entry.hostKeyFingerprint = fingerprint
++      this.save(file)
++      return { status: 'trusted' }
++    }
++    if (entry.hostKeyFingerprint === fingerprint) return { status: 'matched' }
++    return { status: 'changed', expected: entry.hostKeyFingerprint }
++  }
++
+   /** Secret-free projection for the browser and agent surfaces. */
+   summarize(entry: SshHostEntry): SshHostSummary {
+     let keyReady = true
+@@ -133,22 +165,30 @@ export class HostStore {
+     const file = this.load()
+     if (file.hosts.some(entry => entry.alias === alias)) throw new Error(`alias '${alias}' already exists`)
+     const now = Date.now()
++    const auth: SshHostEntry['auth'] = payload.auth.kind === 'key'
++      ? {
++          kind: 'key',
++          keyPath: expandHome(payload.auth.keyPath?.trim() ?? ''),
++          ...(payload.auth.passphrase !== undefined ? { passphrase: payload.auth.passphrase } : {}),
++        }
++      : {
++          kind: 'password',
++          ...(payload.auth.password !== undefined ? { password: payload.auth.password } : {}),
++        }
++    const description = payload.description?.trim()
++    const environment = payload.environment?.trim()
++    const location = payload.location?.trim()
+     const entry: SshHostEntry = {
+       alias,
+       host: payload.host.trim(),
+       port: payload.port ?? 22,
+       user: payload.user.trim(),
+-      auth: {
+-        kind: payload.auth.kind,
+-        keyPath: payload.auth.kind === 'key' ? expandHome(payload.auth.keyPath?.trim() ?? '') : undefined,
+-        passphrase: payload.auth.kind === 'key' ? payload.auth.passphrase ?? undefined : undefined,
+-        password: payload.auth.kind === 'password' ? payload.auth.password : undefined,
+-      },
++      auth,
+       proxyJump: [...(payload.proxyJump ?? [])],
+-      description: payload.description?.trim() || undefined,
+-      environment: payload.environment?.trim() || undefined,
++      ...(description ? { description } : {}),
++      ...(environment ? { environment } : {}),
+       tags: [...(payload.tags ?? [])].map(tag => tag.trim()).filter(tag => tag !== ''),
+-      location: payload.location?.trim() || undefined,
++      ...(location ? { location } : {}),
+       createdAt: now,
+       updatedAt: now,
+     }
+@@ -179,6 +219,8 @@ export class HostStore {
+     if (patch.tags !== undefined && (!Array.isArray(patch.tags) || patch.tags.some(x => typeof x !== 'string'))) {
+       throw new Error('tags must be an array of strings')
+     }
++    const endpointChanged = (patch.host !== undefined && patch.host.trim() !== entry.host)
++      || (patch.port !== undefined && patch.port !== entry.port)
+     if (patch.host !== undefined) entry.host = patch.host.trim()
+     if (patch.port !== undefined) entry.port = patch.port
+     if (patch.user !== undefined) entry.user = patch.user.trim()
+@@ -196,20 +238,38 @@ export class HostStore {
+       const keyChanged = auth.kind === 'key'
+         && auth.keyPath !== undefined
+         && expandHome(auth.keyPath.trim()) !== entry.auth.keyPath
+-      entry.auth = {
+-        kind: auth.kind,
+-        keyPath: auth.kind === 'key' ? expandHome(auth.keyPath?.trim() ?? '') : undefined,
+-        passphrase: auth.kind === 'key'
+-          ? (auth.passphrase !== undefined ? auth.passphrase : (keyChanged ? undefined : entry.auth.passphrase))
+-          : undefined,
+-        password: auth.kind === 'password' ? auth.password : undefined,
+-      }
++      const passphrase = auth.kind === 'key'
++        ? (auth.passphrase !== undefined ? auth.passphrase : (keyChanged ? undefined : entry.auth.passphrase))
++        : undefined
++      entry.auth = auth.kind === 'key'
++        ? {
++            kind: 'key',
++            keyPath: expandHome(auth.keyPath?.trim() ?? ''),
++            ...(passphrase !== undefined ? { passphrase } : {}),
++          }
++        : {
++            kind: 'password',
++            ...(auth.password !== undefined ? { password: auth.password } : {}),
++          }
+     }
+     if (patch.proxyJump !== undefined) entry.proxyJump = [...patch.proxyJump]
+-    if (patch.description !== undefined) entry.description = patch.description.trim() || undefined
+-    if (patch.environment !== undefined) entry.environment = patch.environment.trim() || undefined
++    if (patch.description !== undefined) {
++      const description = patch.description.trim()
++      if (description === '') delete entry.description
++      else entry.description = description
++    }
++    if (patch.environment !== undefined) {
++      const environment = patch.environment.trim()
++      if (environment === '') delete entry.environment
++      else entry.environment = environment
++    }
+     if (patch.tags !== undefined) entry.tags = [...patch.tags].map(tag => tag.trim()).filter(tag => tag !== '')
+-    if (patch.location !== undefined) entry.location = patch.location.trim() || undefined
++    if (patch.location !== undefined) {
++      const location = patch.location.trim()
++      if (location === '') delete entry.location
++      else entry.location = location
++    }
++    if (endpointChanged) delete entry.hostKeyFingerprint
+     entry.updatedAt = Date.now()
+     this.save(file)
+     return entry
+@@ -249,8 +309,11 @@ export class HostStore {
+       if (line === '' || line.startsWith('#')) continue
+       const match = /^([A-Za-z0-9_\-]+)\s+(.+)$/.exec(line)
+       if (match === null) continue
+-      const key = match[1].toLowerCase()
+-      const value = match[2].trim()
++      const keyPart = match[1]
++      const valuePart = match[2]
++      if (keyPart === undefined || valuePart === undefined) continue
++      const key = keyPart.toLowerCase()
++      const value = valuePart.trim()
+       if (key === 'host') {
+         current = { pattern: value, props: {} }
+         blocks.push(current)
+@@ -261,6 +324,7 @@ export class HostStore {
+     let added = 0
+     for (const block of blocks) {
+       const pattern = block.pattern.split(/\s+/)[0]
++      if (pattern === undefined || pattern === '') continue
+       if (pattern.includes('*') || pattern.includes('?')) {
+         skip(pattern, this.skippedNames)
+         continue
+@@ -275,23 +339,27 @@ export class HostStore {
+         skip(pattern, this.skippedNames)
+         continue
+       }
++      const identityFile = block.props.identityfile
++      const password = block.props.password
++      const auth: SshHostEntry['auth'] = identityFile !== undefined
++        ? { kind: 'key', keyPath: identityFile }
++        : { kind: 'password', ...(password !== undefined ? { password } : {}) }
++      const description = block.props.description
++      const environment = block.props.environment
++      const location = block.props.location
+       const payload: HostPayload = {
+         alias: pattern,
+         host: hostName,
+         port: block.props.port !== undefined ? Number.parseInt(block.props.port, 10) : 22,
+         user: block.props.user ?? process.env.USER ?? 'root',
+-        auth: {
+-          kind: block.props.identityfile !== undefined ? 'key' : 'password',
+-          keyPath: block.props.identityfile,
+-          password: block.props.password,
+-        },
++        auth,
+         proxyJump: block.props.proxyjump !== undefined
+           ? block.props.proxyjump.split(',').map(hop => hop.trim()).filter(hop => hop !== '')
+           : [],
+-        description: block.props.description,
+-        environment: block.props.environment,
++        ...(description !== undefined ? { description } : {}),
++        ...(environment !== undefined ? { environment } : {}),
+         tags: (block.props.tags ?? '').split(',').map(tag => tag.trim()).filter(tag => tag !== ''),
+-        location: block.props.location,
++        ...(location !== undefined ? { location } : {}),
+       }
+       try {
+         this.create(payload)

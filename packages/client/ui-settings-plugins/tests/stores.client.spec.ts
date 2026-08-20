@@ -3,9 +3,15 @@
  * call a save reaches, and what happens to drafts the Host did not accept.
  */
 
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { stubSettingsScope, type StubSettingsScope } from '@deepseek-ai/dsh-client-test-runtime'
-import { CardForm, numberField, textField } from '../src/client/card-form.ts'
+import {
+  CardForm,
+  FIELD_WRITE_TIMEOUT_MS,
+  SAVE_TIMEOUT_MS,
+  numberField,
+  textField,
+} from '../src/client/card-form.ts'
 import { AgentLoopCardController, type AgentLoopSettings } from '../src/client/agent-loop-card-controller.ts'
 import { BashCardController, type BashSettings } from '../src/client/bash-card-controller.ts'
 import { WebSearchCardController, type WebSearchSettings } from '../src/client/web-search-card-controller.ts'
@@ -14,15 +20,21 @@ import { WebSearchCardController, type WebSearchSettings } from '../src/client/w
 function acceptWrites<T>(host: StubSettingsScope<T>): void {
   const section = (): Record<string, unknown> => ({ ...host.scope.getSnapshot().value as object })
   const layer = (): Record<string, unknown> => ({ ...host.scope.getSnapshot().user as object })
-  host.set.mockImplementation((field: string, value: unknown) => {
+  host.set.mockImplementation((field: string, value: unknown, _signal?: AbortSignal) => {
     host.publish({ value: { ...section(), [field]: value } as T, user: { ...layer(), [field]: value } })
+    return Promise.resolve()
   })
-  host.unset.mockImplementation((field: string) => {
+  host.unset.mockImplementation((field: string, _signal?: AbortSignal) => {
     const user = Object.fromEntries(Object.entries(layer()).filter(([key]) => key !== field))
     const base = host.scope.getSnapshot().base as Record<string, unknown> | undefined
     host.publish({ value: { ...section(), [field]: base?.[field] } as T, user })
+    return Promise.resolve()
   })
 }
+
+afterEach(() => {
+  vi.useRealTimers()
+})
 
 function credentialsApi(configured: boolean) {
   const describe = vi.fn(() => Promise.resolve({
@@ -75,7 +87,7 @@ describe('CardForm', () => {
 
     await subject.save()
 
-    expect(host.set.mock.calls).toEqual([['timeoutMs', 9_000]])
+    expect(host.set.mock.calls).toEqual([['timeoutMs', 9_000, expect.any(AbortSignal)]])
     expect(subject.shell()).toMatchObject({ dirty: false, failed: false, saving: false })
   })
 
@@ -118,7 +130,7 @@ describe('CardForm', () => {
 
     await subject.save()
 
-    expect(host.unset.mock.calls).toEqual([['timeoutMs']])
+    expect(host.unset.mock.calls).toEqual([['timeoutMs', expect.any(AbortSignal)]])
     expect(subject.shell()).toMatchObject({ dirty: false, failed: false })
   })
 
@@ -143,7 +155,7 @@ describe('CardForm', () => {
     expect(subject.field('timeoutMs')).toEqual({ text: '', overridden: false, invalid: false })
     await subject.save()
 
-    expect(host.unset.mock.calls).toEqual([['timeoutMs']])
+    expect(host.unset.mock.calls).toEqual([['timeoutMs', expect.any(AbortSignal)]])
   })
 
   it('clears a text field by emptying it', async () => {
@@ -154,7 +166,7 @@ describe('CardForm', () => {
     subject.actions().edit('baseURL', '   ')
     await subject.save()
 
-    expect(host.unset.mock.calls).toEqual([['baseURL']])
+    expect(host.unset.mock.calls).toEqual([['baseURL', expect.any(AbortSignal)]])
   })
 
   it('writes the trimmed text of a text field', async () => {
@@ -164,7 +176,7 @@ describe('CardForm', () => {
     subject.actions().edit('baseURL', '  https://other.test  ')
     await subject.save()
 
-    expect(host.set.mock.calls).toEqual([['baseURL', 'https://other.test']])
+    expect(host.set.mock.calls).toEqual([['baseURL', 'https://other.test', expect.any(AbortSignal)]])
   })
 
   it('keeps the drafts a save did not land, and reports the failure', async () => {
@@ -175,7 +187,7 @@ describe('CardForm', () => {
 
     // The stub Host accepted the call without storing it, exactly as a
     // validator that refuses the value does.
-    expect(host.set).toHaveBeenCalledWith('timeoutMs', 9_000)
+    expect(host.set).toHaveBeenCalledWith('timeoutMs', 9_000, expect.any(AbortSignal))
     expect(subject.shell()).toMatchObject({ dirty: true, failed: true, saving: false })
     expect(subject.field('timeoutMs').text).toBe('9000')
   })
@@ -187,7 +199,7 @@ describe('CardForm', () => {
     subject.actions().resetField('timeoutMs')
     await subject.save()
 
-    expect(host.unset).toHaveBeenCalledWith('timeoutMs')
+    expect(host.unset).toHaveBeenCalledWith('timeoutMs', expect.any(AbortSignal))
     expect(subject.shell().failed).toBe(true)
   })
 
@@ -232,6 +244,68 @@ describe('CardForm', () => {
     await Promise.all([first, second])
 
     expect(host.set).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps an edit staged after an older draft saves', async () => {
+    const { host, subject } = form()
+    let finishWrite: (() => void) | undefined
+    host.set.mockImplementation((field: string, value: unknown) => new Promise<void>((resolve) => {
+      finishWrite = () => {
+        host.publish({ value: { [field]: value }, user: { [field]: value } })
+        resolve()
+      }
+    }))
+    subject.actions().edit('timeoutMs', '9000')
+
+    const saving = subject.save()
+    subject.actions().edit('timeoutMs', '10000')
+    finishWrite?.()
+    await saving
+
+    expect(subject.field('timeoutMs').text).toBe('10000')
+    expect(subject.shell()).toMatchObject({ dirty: true, saving: false, failed: false })
+  })
+
+  it('aborts a field write that never settles and keeps the draft retryable', async () => {
+    vi.useFakeTimers()
+    const { host, subject } = form()
+    let writeSignal: AbortSignal | undefined
+    host.set.mockImplementation((_field: string, _value: unknown, signal?: AbortSignal) => {
+      writeSignal = signal
+      return new Promise<void>(() => {})
+    })
+    subject.actions().edit('timeoutMs', '9000')
+
+    const saving = subject.save()
+    const rejected = expect(saving).rejects.toThrow('settings field write 1 timed out')
+    expect(subject.shell()).toMatchObject({ dirty: true, saving: true, failed: false, error: null })
+
+    await vi.advanceTimersByTimeAsync(FIELD_WRITE_TIMEOUT_MS)
+    await rejected
+
+    expect(FIELD_WRITE_TIMEOUT_MS).toBe(4_000)
+    expect(SAVE_TIMEOUT_MS).toBe(10_000)
+    expect(writeSignal?.aborted).toBe(true)
+    expect(subject.shell()).toMatchObject({ dirty: true, saving: false, failed: true, error: 'saveTimedOut' })
+    expect(subject.field('timeoutMs').text).toBe('9000')
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('leaves saving after a rejected write and succeeds when retried', async () => {
+    const { host, subject } = form()
+    host.set.mockRejectedValueOnce(new Error('connection offline'))
+    subject.actions().edit('timeoutMs', '9000')
+
+    await expect(subject.save()).rejects.toThrow('connection offline')
+
+    expect(subject.shell()).toMatchObject({ dirty: true, saving: false, failed: true, error: 'saveError' })
+    expect(subject.field('timeoutMs').text).toBe('9000')
+
+    acceptWrites(host)
+    await subject.save()
+
+    expect(host.set).toHaveBeenCalledTimes(2)
+    expect(subject.shell()).toMatchObject({ dirty: false, saving: false, failed: false, error: null })
   })
 
   it('publishes a projection whenever the scope or a draft changes', () => {
@@ -302,7 +376,10 @@ describe('BashCardController', () => {
     face.save()
     await vi.waitFor(() => { expect(host.set).toHaveBeenCalledTimes(2) })
 
-    expect(host.set.mock.calls).toEqual([['timeoutMs', 9_000], ['maxOutputBytes', 1_024]])
+    expect(host.set.mock.calls).toEqual([
+      ['timeoutMs', 9_000, expect.any(AbortSignal)],
+      ['maxOutputBytes', 1_024, expect.any(AbortSignal)],
+    ])
     expect(face.hooks.bashCard.getSnapshot().dirty).toBe(false)
   })
 
@@ -323,7 +400,7 @@ describe('BashCardController', () => {
     expect(face.hooks.bashCard.getSnapshot().timeoutMs.text).toBe('60000')
 
     face.save()
-    await vi.waitFor(() => { expect(host.unset).toHaveBeenCalledWith('timeoutMs') })
+    await vi.waitFor(() => { expect(host.unset).toHaveBeenCalledWith('timeoutMs', expect.any(AbortSignal)) })
 
     expect(face.hooks.bashCard.getSnapshot()).toMatchObject({
       dirty: false,
@@ -361,7 +438,9 @@ describe('AgentLoopCardController', () => {
 
     face.edit('maxParallelToolCalls', '4')
     face.save()
-    await vi.waitFor(() => { expect(host.set).toHaveBeenCalledWith('maxParallelToolCalls', 4) })
+    await vi.waitFor(() => {
+      expect(host.set).toHaveBeenCalledWith('maxParallelToolCalls', 4, expect.any(AbortSignal))
+    })
 
     expect(face.hooks.agentLoopCard.getSnapshot()).toMatchObject({
       dirty: false,
@@ -414,7 +493,10 @@ describe('WebSearchCardController', () => {
     face.save()
     await vi.waitFor(() => { expect(credentials.set).toHaveBeenCalled() })
 
-    expect(credentials.set).toHaveBeenCalledWith({ ref: 'DEEPSEEK_API_KEY', value: 'ds-secret' })
+    expect(credentials.set).toHaveBeenCalledWith(
+      { ref: 'DEEPSEEK_API_KEY', value: 'ds-secret' },
+      expect.any(AbortSignal),
+    )
     expect(host.set).not.toHaveBeenCalled()
     await vi.waitFor(() => {
       expect(face.hooks.webSearchCard.getSnapshot()).toMatchObject({ dirty: false, apiKeyConfigured: true })
@@ -471,7 +553,10 @@ describe('WebSearchCardController', () => {
     face.save()
     await vi.waitFor(() => { expect(credentials.set).toHaveBeenCalled() })
 
-    expect(credentials.set).toHaveBeenCalledWith({ ref: 'SEARCH_KEY', value: 'ds-secret' })
+    expect(credentials.set).toHaveBeenCalledWith(
+      { ref: 'SEARCH_KEY', value: 'ds-secret' },
+      expect.any(AbortSignal),
+    )
   })
 
   it('reports a key the Host did not store as a failed save', async () => {
@@ -534,7 +619,10 @@ describe('WebSearchCardController', () => {
     face.save()
     await vi.waitFor(() => { expect(host.set).toHaveBeenCalledTimes(2) })
 
-    expect(host.set.mock.calls).toEqual([['baseURL', 'https://other.test'], ['maxUses', 3]])
+    expect(host.set.mock.calls).toEqual([
+      ['baseURL', 'https://other.test', expect.any(AbortSignal)],
+      ['maxUses', 3, expect.any(AbortSignal)],
+    ])
     expect(credentials.set).not.toHaveBeenCalled()
   })
 })

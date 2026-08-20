@@ -36,3 +36,5 @@
         - 'button "展开设置: 网页搜索"':
           - text: 网页搜索 DeepSeek 搜索提供方。
           - img
+      - listitem:
+        - 'button "展开: Web UI 插件"': Web UI 插件 统一管理 dsh-web-ui 全家桶插件的启用与配置。 ▾

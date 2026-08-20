@@ -43,6 +43,9 @@ export default defineConfig({
     // apps/cli only, not apps/*: apps/web/tests/*.e2e.ts needs the built
     // frontend dist and runs under vitest.web.config.ts (the test:web job).
     include: ['packages/*/*/tests/**/*.e2e.ts', 'apps/cli/tests/**/*.e2e.ts', 'examples/*/tests/**/*.e2e.ts'],
+    // External macOS volumes can materialize binary AppleDouble metadata
+    // beside a test file. It is never executable test source.
+    exclude: ['**/._*'],
     // Real model calls: generous timeouts, and retries for transient flakes
     // (the shared internal key hits concurrency quotas). No coverage — the
     // unit suites own the coverage gate.

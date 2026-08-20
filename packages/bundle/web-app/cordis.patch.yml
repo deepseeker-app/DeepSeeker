@@ -161,6 +161,8 @@
         # A deployment adding authorities keeps this expression and concatenates
         # its literals, for example: ['app.internal', ...ctx.webRuntime.trustedHosts].
         trustedHosts: !!js ctx.webRuntime.trustedHosts
+        # The paired-device authorizer must decide every non-loopback request.
+        requireRemoteAuthorization: true
 
     - id: api-remotes
       name: '@deepseek-ai/dsh-api-remotes'
@@ -272,6 +274,50 @@
 
     - id: ui-trajectory
       name: '@deepseek-ai/dsh-client-ui-trajectory'
+
+    # Account balance: official DeepSeek balance API through a same-origin,
+    # credential-safe Host route; the browser card lives in the sidebar foot.
+    - id: ui-deepseek-balance
+      name: '@deepseek-ai/dsh-client-ui-deepseek-balance'
+
+    # DeepSeeker's built-in Web feature suite. Versions are pinned in this
+    # bundle so the desktop release and the source build mount the same code.
+    - id: ui-web-ui-compat
+      name: '@linxin666/dsh-web-ui-all'
+
+    - id: ui-web-ui-settings
+      name: '@linxin666/dsh-client-ui-web-ui-settings'
+
+    - id: ui-dsh-aionui-panel
+      name: '@linxin666/dsh-client-ui-aionui-panel'
+
+    - id: ui-task-board
+      name: '@linxin666/dsh-client-ui-task-board'
+
+    - id: ui-git-graph
+      name: '@linxin666/dsh-client-ui-git-graph'
+
+    - id: pet
+      name: '@linxin666/dsh-pet'
+
+    - id: remote-web-ui
+      name: '@linxin666/dsh-remote-web-ui'
+
+    - id: live-stats
+      name: '@linxin666/dsh-live-stats'
+
+    - id: ssh
+      name: '@linxin666/dsh-ssh'
+      config:
+        surface: host
+
+    - id: describe-image
+      name: '@linxin666/dsh-tool-describe-image'
+      config:
+        surface: host
+
+    - id: ui-skin-center
+      name: '@linxin666/dsh-client-ui-skin-center'
 
 # ── the agent plane moves behind agent presets ─────────────────────────────
 #

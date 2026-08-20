@@ -251,6 +251,18 @@
     fetch: false
     searchTimeoutMs: 60000
 
+# The Host rows own settings, browser routes, and the shared SSH connection
+# pool. These preset rows contribute only the tools this agent may call.
+- id: tool-ssh
+  name: '@linxin666/dsh-ssh'
+  config:
+    surface: agent
+
+- id: tool-describe-image
+  name: '@linxin666/dsh-tool-describe-image'
+  config:
+    surface: agent
+
 # ── presentation ────────────────────────────────────────────────────────────
 
 # Code Mode for this agent alone. The row waits for the host's `codeRuntime`

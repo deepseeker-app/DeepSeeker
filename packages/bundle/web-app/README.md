@@ -4,6 +4,14 @@ English | [中文](README.zh.md)
 
 The dsh browser-surface bundle. [`cordis.patch.yml`](cordis.patch.yml) rides over [`dsh-base`](../base/README.md): it sets the coding persona, inserts the Web host rows (webserver, API gateway, workspace, projection cache, storage) and the browser plugin roster, the always-on client-plugin reload chain ([`dsh-client-hmr`](../../client/hmr/README.md), idle until a rebuild watcher rewrites client bundles), and mounts this package's `web-runtime` glue plugin (config `{printUrl, surfaceContext, trustedHosts}`). That plugin resolves the built frontend dist through `@deepseek-ai/dsh-web-frontend`'s exports, samples bind-dependent LAN trust once, provides it as `webRuntime` to the browser-trust fence and client roster, mounts the [`frontend-static`](../../host/frontend-static/README.md) fallback owner, registers the harness-source and web-surface prompt sections plus the bash-visible `DSH_WEB_URL` runtime variable when `surfaceContext` is true, and prints the `dsh web:` URL line when `printUrl` is true, after its Loader tree settles so a sibling failure cannot announce a dead app. This bundle also owns the app command line: the ordinary `web-startup` provider ([`src/startup.ts`](src/startup.ts)) injects `ctx.cmdlineArgs` ([`dsh-cmdline`](../../boot/cmdline/README.md)), parses `--host`, `--port`, repeatable `--trusted-host`, and the app's `--help`, then provides `webStartup`. It rejects `--host 0.0.0.0` before publishing that service because the CLI intentionally does not support all-interfaces binding yet. Flag-configured rows inject the service and read it directly from lazy config, so nothing binds a port before argument resolution and `dsh --profile web --help` starts no server. [`dsh-headless`](../headless/README.md) is a sibling surface over the same base and does not mount this bundle.
 
+## Built-in feature suite
+
+DeepSeeker pins `@linxin666/dsh-web-ui-all` and `@linxin666/dsh-tool-describe-image` to `0.1.12`. The Web roster mounts workspace files and previews, Git graph, task board, plugin settings, live statistics, the desktop pet, phone remote control, SSH, image understanding, and the skin center with its nine bundled skins. Local patches expose image-understanding settings through the compatibility panel, clamp the pet and summon control to the current viewport, keep each task-board column readable through horizontal scrolling, and omit `._*` AppleDouble sidecars from the file tree and search. The AionUI layout also hides the file and preview columns below 580 CSS pixels so the chat remains usable on a phone; desktop widths retain the resizable panels.
+
+Internet phone access is opt-in. The normal Web command remains loopback-only and rejects `--host 0.0.0.0`; the remote panel points users to **Settings > Mobile Remote Control > Auto public tunnel**. Only that explicit setting starts the Cloudflare quick tunnel and publishes a temporary pairing URL.
+
+A paired phone starts at `/m`, a restricted quick surface for workspaces, sessions, and chat. **Full workbench** opens the same-origin `/` client and reuses the live pairing cookie for the regular Web UI and shared API; plugin routes designated as loopback-only remain unavailable.
+
 ## Model Experience
 
 ### Harness-source and Web-surface context
@@ -24,3 +32,4 @@ The prompt section sits near the system prompt's head and is stable for the life
 
 - **The frontend dist must be built** — `require.resolve` of the dist fails loud at activation with a build hint; there is no source-serving fallback.
 - **`lanAddresses` is a boot-time snapshot** — interface changes after boot are not re-advertised; the printed LAN URL always matches the configured trust fence.
+- **Remote integrations need their real counterparts** — repository tests do not substitute for a paired phone, an SSH server, or a configured vision-model endpoint.

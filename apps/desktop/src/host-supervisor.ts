@@ -1,12 +1,25 @@
 /** Supervise the loopback Web Host used by the first desktop application. */
 
 import { spawn, type ChildProcessByStdio } from 'node:child_process'
+import { once } from 'node:events'
+import { win32 } from 'node:path'
 import type { Readable } from 'node:stream'
 
 const READINESS_PREFIX = 'dsh web: '
 const DEFAULT_READINESS_TIMEOUT_MS = 90_000
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000
+const DEFAULT_PROFILE_VALIDATION_SHUTDOWN_TIMEOUT_MS = 5_000
+const WINDOWS_TASKKILL_TIMEOUT_MS = 5_000
 const MAX_STARTUP_OUTPUT_CHARS = 32_768
+
+function describeFailure(cause: unknown): string {
+  if (cause instanceof Error) return cause.message
+  if (typeof cause === 'string') return cause
+  if (cause === undefined) return 'unknown failure'
+  if (cause === null) return 'null'
+  if (typeof cause === 'number' || typeof cause === 'boolean' || typeof cause === 'bigint') return String(cause)
+  return 'unknown failure'
+}
 
 /** Incremental parser for the Web Host's canonical readiness line. */
 export interface ReadinessParser {
@@ -95,6 +108,7 @@ export interface HostChild {
   onExit(listener: (code: number | null, signal: NodeJS.Signals | null) => void): () => void
   onError(listener: (error: Error) => void): () => void
   kill(signal: 'SIGTERM' | 'SIGKILL'): void
+  terminateTree?(signal: 'SIGTERM' | 'SIGKILL'): Promise<void>
 }
 
 /** Configuration and platform operations for one Host supervisor. */
@@ -152,6 +166,14 @@ export function createHostSupervisor(options: HostSupervisorOptions): HostSuperv
   let shuttingDown = false
   let output = ''
 
+  const terminate = async (spawned: HostChild, signal: 'SIGTERM' | 'SIGKILL'): Promise<void> => {
+    if (spawned.terminateTree !== undefined) {
+      await spawned.terminateTree(signal)
+      return
+    }
+    spawned.kill(signal)
+  }
+
   const appendOutput = (chunk: string): void => {
     output = `${output}${chunk}`.slice(-MAX_STARTUP_OUTPUT_CHARS)
     options.log?.(chunk)
@@ -192,13 +214,17 @@ export function createHostSupervisor(options: HostSupervisorOptions): HostSuperv
           resolve(url)
         } catch (error) {
           fail(error)
-          spawned.kill('SIGTERM')
+          void terminate(spawned, 'SIGTERM').catch((cause: unknown) => {
+            appendOutput(`desktop Host termination failed: ${describeFailure(cause)}\n`)
+          })
         }
       }
 
       const timer = setTimeout(() => {
         fail(new Error(`desktop Host readiness timed out after ${String(readinessTimeoutMs)}ms`))
-        spawned.kill('SIGTERM')
+        void terminate(spawned, 'SIGTERM').catch((cause: unknown) => {
+          appendOutput(`desktop Host termination failed: ${describeFailure(cause)}\n`)
+        })
       }, readinessTimeoutMs)
       startupCleanups.push(spawned.stdout.onData(acceptChunk))
       startupCleanups.push(spawned.stderr.onData(appendOutput))
@@ -224,22 +250,26 @@ export function createHostSupervisor(options: HostSupervisorOptions): HostSuperv
       const spawned = child
       if (spawned === undefined) return
       shuttingDown = true
-      spawned.kill('SIGTERM')
       const closed = exited ?? Promise.resolve()
-      let timer: ReturnType<typeof setTimeout> | undefined
-      const outcome = await Promise.race([
-        closed.then(() => 'closed' as const),
-        new Promise<'timeout'>((resolve) => {
-          timer = setTimeout(() => {
-            resolve('timeout')
-          }, shutdownTimeoutMs)
-        }),
-      ])
-      if (timer !== undefined) clearTimeout(timer)
-      if (outcome === 'timeout') {
-        spawned.kill('SIGKILL')
-        await closed
+      let gracefulFailure: unknown
+      try {
+        await terminate(spawned, 'SIGTERM')
+      } catch (cause) {
+        gracefulFailure = cause
       }
+      const stopped = gracefulFailure === undefined && await waitForChildExit(closed, shutdownTimeoutMs)
+      if (stopped) return
+      let forceFailure: unknown
+      try {
+        await terminate(spawned, 'SIGKILL')
+      } catch (cause) {
+        forceFailure = cause
+      }
+      if (forceFailure === undefined && await waitForChildExit(closed, shutdownTimeoutMs)) return
+      const failures = [gracefulFailure, forceFailure].filter(cause => cause !== undefined)
+      const timeout = new Error(`desktop Host did not exit within ${String(shutdownTimeoutMs)}ms after SIGKILL`)
+      if (failures.length === 0) throw timeout
+      throw new AggregateError([...failures, timeout], timeout.message)
     })()
     return shutdownPromise
   }
@@ -257,6 +287,8 @@ export interface SpawnDshWebOptions {
   readonly cwd: string
   /** Frozen environment for the Host process. */
   readonly env: NodeJS.ProcessEnv
+  /** Harness profile to boot inside the selected configuration scheme. */
+  readonly profileName?: string
   /** Run the Electron executable as its bundled Node runtime. */
   readonly electronRunAsNode?: boolean
 }
@@ -280,13 +312,156 @@ export function spawnDshWeb(options: SpawnDshWebOptions): HostChild {
   const env = options.electronRunAsNode
     ? { ...options.env, ELECTRON_RUN_AS_NODE: '1' }
     : options.env
-  const process = spawn(options.nodeExecutable, ['--expose-internals', options.cliEntry, 'web', '--host', '127.0.0.1', '--port', '0'], {
+  const process = spawn(options.nodeExecutable, [
+    '--expose-internals',
+    options.cliEntry,
+    '--profile',
+    options.profileName ?? 'web',
+    '--host',
+    '127.0.0.1',
+    '--port',
+    '0',
+  ], {
     cwd: options.cwd,
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   })
   return nodeChildAdapter(process)
+}
+
+/** Inputs for a bounded profile composition check before desktop selection. */
+export interface ValidateDshProfileOptions extends SpawnDshWebOptions {
+  /** Maximum time allowed for `--dump-config` to complete. */
+  readonly timeoutMs?: number
+  /** Grace after SIGTERM before the validation child receives SIGKILL. */
+  readonly shutdownTimeoutMs?: number
+  /** Application shutdown cancellation. The returned promise joins child exit before rejecting. */
+  readonly signal?: AbortSignal
+  /** Optional profile-check child supplied by tests. */
+  readonly spawnValidation?: () => HostChild
+}
+
+async function waitForChildExit(exited: Promise<void>, timeoutMs: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const outcome = await Promise.race([
+    exited.then(() => true),
+    new Promise<false>((resolve) => {
+      timer = setTimeout(() => { resolve(false) }, timeoutMs)
+    }),
+  ])
+  if (timer !== undefined) clearTimeout(timer)
+  return outcome
+}
+
+/**
+ * Validate a profile in a separate process without stopping the running Host.
+ * @param options - The same executable, CLI, working directory and environment used for a real Host.
+ */
+export function validateDshProfile(options: ValidateDshProfileOptions): Promise<void> {
+  if (options.signal?.aborted === true) return Promise.reject(new Error('配置方案检查已取消。'))
+  const env = options.electronRunAsNode
+    ? { ...options.env, ELECTRON_RUN_AS_NODE: '1' }
+    : options.env
+  const timeoutMs = options.timeoutMs ?? 30_000
+  const shutdownTimeoutMs = options.shutdownTimeoutMs ?? DEFAULT_PROFILE_VALIDATION_SHUTDOWN_TIMEOUT_MS
+  return new Promise<void>((resolve, reject) => {
+    let child: HostChild
+    try {
+      child = options.spawnValidation?.() ?? nodeChildAdapter(spawn(options.nodeExecutable, [
+        '--expose-internals',
+        options.cliEntry,
+        '--profile',
+        options.profileName ?? 'web',
+        '--dump-config',
+      ], {
+        cwd: options.cwd,
+        env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      }))
+    } catch (cause) {
+      reject(cause instanceof Error ? cause : new Error('配置方案检查无法启动。', { cause }))
+      return
+    }
+    let output = ''
+    let settled = false
+    let stopping = false
+    const exitResult = Promise.withResolvers<void>()
+    const cleanups: Array<() => void> = []
+    const append = (chunk: string): void => {
+      output = `${output}${chunk}`.slice(-MAX_STARTUP_OUTPUT_CHARS)
+    }
+    const finish = (cause?: unknown): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      for (const cleanup of cleanups.splice(0)) cleanup()
+      if (cause === undefined) {
+        resolve()
+        return
+      }
+      const detail = output.trim() === '' ? '' : `\n${output.trim()}`
+      reject(new Error(`${describeFailure(cause)}${detail}`))
+    }
+    const fail = (cause: Error): void => {
+      if (stopping) return
+      finish(new Error(`配置方案检查无法启动：${cause.message}`))
+    }
+    const exited = (code: number | null, signal: NodeJS.Signals | null): void => {
+      exitResult.resolve()
+      if (stopping) return
+      if (code === 0) finish()
+      else finish(new Error(`配置方案检查失败（code ${String(code)}, signal ${String(signal)}）。`))
+    }
+    const stop = (stopCause: Error): void => {
+      if (settled || stopping) return
+      stopping = true
+      void (async () => {
+        let termCause: unknown
+        try {
+          child.kill('SIGTERM')
+        } catch (cause) {
+          termCause = cause
+        }
+        const stopped = termCause === undefined
+          ? await waitForChildExit(exitResult.promise, shutdownTimeoutMs)
+          : false
+        let killCause: unknown
+        let forcedExitCause: unknown
+        if (!stopped) {
+          try {
+            child.kill('SIGKILL')
+          } catch (cause) {
+            killCause = cause
+          }
+          const forcedStopped = await waitForChildExit(exitResult.promise, shutdownTimeoutMs)
+          if (!forcedStopped) {
+            forcedExitCause = new Error(`配置方案检查在强制停止后 ${String(shutdownTimeoutMs)}ms 内仍未退出。`)
+          }
+        }
+        const failures = [termCause, killCause, forcedExitCause].filter(cause => cause !== undefined)
+        finish(failures.length === 0
+          ? stopCause
+          : new AggregateError(
+            [stopCause, ...failures],
+            `${stopCause.message} ${failures.map(cause => describeFailure(cause)).join(' ')}`,
+          ))
+      })()
+    }
+    const timer = setTimeout(() => {
+      stop(new Error(`配置方案检查超过 ${String(timeoutMs)}ms。`))
+    }, timeoutMs)
+    const abort = (): void => { stop(new Error('配置方案检查已取消。')) }
+    cleanups.push(child.stdout.onData(append))
+    cleanups.push(child.stderr.onData(append))
+    cleanups.push(child.onError(fail))
+    cleanups.push(child.onExit(exited))
+    if (options.signal !== undefined) {
+      options.signal.addEventListener('abort', abort, { once: true })
+      cleanups.push(() => { options.signal?.removeEventListener('abort', abort) })
+    }
+  })
 }
 
 /** Adapt Node's event overloads to the supervisor's explicit ownership API. */
@@ -305,6 +480,25 @@ function nodeChildAdapter(child: ChildProcessByStdio<null, Readable, Readable>):
     },
     kill(signal) {
       child.kill(signal)
+    },
+    async terminateTree(signal) {
+      if (process.platform !== 'win32' || child.pid === undefined) {
+        child.kill(signal)
+        return
+      }
+      const systemRoot = process.env.SystemRoot ?? 'C:\\Windows'
+      const taskkill = spawn(win32.join(systemRoot, 'System32', 'taskkill.exe'), [
+        '/PID',
+        String(child.pid),
+        '/T',
+        ...(signal === 'SIGKILL' ? ['/F'] : []),
+      ], {
+        stdio: 'ignore',
+        windowsHide: true,
+        timeout: WINDOWS_TASKKILL_TIMEOUT_MS,
+        killSignal: 'SIGKILL',
+      })
+      await once(taskkill, 'close')
     },
   }
 }

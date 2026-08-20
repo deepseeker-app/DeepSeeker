@@ -1,0 +1,1324 @@
+diff --git a/lib/client.js b/lib/client.js
+index 6b29fc3203fd2177a956a66ce491acbba3ef2f18..de48f4ab0ba7c4e96b6cfe6e0b0402f6ef63a6e8 100644
+--- a/lib/client.js
++++ b/lib/client.js
+@@ -242,7 +242,7 @@ window.__ModuleLoader__.load({
+ 		* The branch picker popover.
+ 		* @param props - see {@link BranchPopoverProps}.
+ 		*/
+-		function BranchPopover({ view, onSwitch, onSwitched, onCreate, onGraph, onClose, t }) {
++		function BranchPopover({ view, readOnly, onSwitch, onSwitched, onCreate, onGraph, onClose, t }) {
+ 			const [query, setQuery] = (0, react.useState)("");
+ 			const [pending, setPending] = (0, react.useState)(null);
+ 			const [error, setError] = (0, react.useState)(null);
+@@ -257,7 +257,7 @@ window.__ModuleLoader__.load({
+ 				return view.branches.filter((branch) => branch.name.toLowerCase().includes(needle));
+ 			}, [view.branches, query]);
+ 			const switchTo = (branch) => {
+-				if (pending !== null) return;
++				if (readOnly || pending !== null) return;
+ 				setPending(branch);
+ 				setError(null);
+ 				setSuccess(null);
+@@ -295,6 +295,10 @@ window.__ModuleLoader__.load({
+ 						className: context_module_css_default.dirty,
+ 						children: t("branch.dirty", { count: view.dirtyFiles })
+ 					}),
++					readOnly && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
++						className: context_module_css_default.empty,
++						children: t("branch.remoteReadOnly")
++					}),
+ 					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+ 						className: context_module_css_default.list,
+ 						children: filtered.length === 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+@@ -308,7 +312,7 @@ window.__ModuleLoader__.load({
+ 							},
+ 							role: "option",
+ 							"aria-selected": branch.current,
+-							disabled: pending !== null,
++							disabled: readOnly || pending !== null,
+ 							children: [
+ 								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconBranchOutline16, { size: 14 }),
+ 								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+@@ -336,7 +340,7 @@ window.__ModuleLoader__.load({
+ 					}),
+ 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+ 						className: context_module_css_default.footer,
+-						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
++						children: [!readOnly && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
+ 							type: "button",
+ 							className: context_module_css_default.footerItem,
+ 							onClick: onCreate,
+@@ -782,6 +786,7 @@ window.__ModuleLoader__.load({
+ 					}),
+ 					branchOpen && branchesView !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(BranchPopover, {
+ 						view: branchesView,
++						readOnly: props.readOnly,
+ 						onSwitch: (branch) => props.switchBranch(props.sessionId, branch),
+ 						onSwitched: refetch,
+ 						onCreate: () => {
+@@ -797,7 +802,7 @@ window.__ModuleLoader__.load({
+ 						},
+ 						t: props.t
+ 					}),
+-					createOpen && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(CreateBranchDialog, {
++					!props.readOnly && createOpen && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(CreateBranchDialog, {
+ 						onCreate: (name) => props.createBranch(props.sessionId, name),
+ 						onClose: closeCreate,
+ 						t: props.t
+@@ -821,6 +826,7 @@ window.__ModuleLoader__.load({
+ 			"branch.empty": "未找到匹配分支",
+ 			"branch.detached": "分离 HEAD",
+ 			"branch.dirty": "未提交的更改：{count} 个文件",
++			"branch.remoteReadOnly": "手机远程只读。切换或新建分支请回到电脑。",
+ 			"branch.create": "创建并检出新分支…",
+ 			"branch.graph": "Git 图谱",
+ 			"branch.createDialog.title": "创建并检出新分支",
+@@ -861,6 +867,7 @@ window.__ModuleLoader__.load({
+ 			"branch.empty": "No matching branches",
+ 			"branch.detached": "Detached HEAD",
+ 			"branch.dirty": "Uncommitted changes: {count} files",
++			"branch.remoteReadOnly": "Remote access is read-only. Switch or create branches on the computer.",
+ 			"branch.create": "Create and switch to new branch…",
+ 			"branch.graph": "Git Graph",
+ 			"branch.createDialog.title": "Create and switch to new branch",
+@@ -899,28 +906,30 @@ window.__ModuleLoader__.load({
+ 		//#region src/client/index.ts
+ 		/** Dictionary namespace owned by this plugin. */
+ 		const NS = "git-graph";
+-		/** Required services: slots for the selector-context entry, sessions for the cwd lookup, locale for the copy. */
++		/** Required services: slots for the dock entry, sessions for the cwd lookup, locale for the copy. */
+ 		const inject = [
+ 			"slots",
+ 			"sessions",
+ 			"connection",
+-			"locale"
++			"locale",
++			"sharedEventSource"
+ 		];
++		function subscribeChangesShared(ctx, path, onChange) {
++			return ctx.sharedEventSource.subscribe({
++				url: `/git/events?path=${encodeURIComponent(path)}`,
++				key: `git:${path}`,
++				eventName: "change",
++				onMessage: onChange,
++				onCoordinationError: (error) => { console.warn("[dsh-git-graph] shared event stream unavailable", error); }
++			});
++		}
+ 		/** The session-cwd lookup failure shared by the injected verbs. */
+ 		const NO_WORKSPACE = {
+ 			code: "workspace-unknown",
+ 			message: "session has no workspace"
+ 		};
+ 		/**
+-		* How long the chip waits for the selector-context declaration before
+-		* falling back to the input dock. The window covers the shell's first
+-		* render of the input selector row after the conversation service is up;
+-		* shells that never declare the hole (rc.6) land on the dock after it.
+-		*/
+-		const CONTEXT_FALLBACK_MS = 2e3;
+-		/**
+-		* Client plugin body: the branch chip entry with its git verbs, on the
+-		* selector-context hole with an input-dock fallback.
++		* Client plugin body: the branch chip entry with its git verbs on the input dock.
+ 		* @param ctx - client root context.
+ 		*/
+ 		function apply(ctx) {
+@@ -928,11 +937,8 @@ window.__ModuleLoader__.load({
+ 				zh,
+ 				en
+ 			}), "dsh-git-graph: dictionaries");
++			const connection = ctx.get("connection");
+ 			const git = new GitApi();
+-			let fallbackTimer;
+-			ctx.effect(() => () => {
+-				if (fallbackTimer !== void 0) clearTimeout(fallbackTimer);
+-			}, "dsh-git-graph: context fallback timer");
+ 			ctx.inject([
+ 				"slots",
+ 				"conversation",
+@@ -956,6 +962,7 @@ window.__ModuleLoader__.load({
+ 						};
+ 					};
+ 					return {
++						readOnly: !connection.isLoopback,
+ 						repoStatus: async (sessionId) => {
+ 							const resolved = pathOf(sessionId);
+ 							if (!resolved.ok) return null;
+@@ -1001,7 +1008,7 @@ window.__ModuleLoader__.load({
+ 						subscribeChanges: (sessionId, onChange) => {
+ 							const resolved = pathOf(sessionId);
+ 							if (!resolved.ok) return () => {};
+-							return subscribeChanges(resolved.path, onChange);
++							return subscribeChangesShared(ctx, resolved.path, onChange);
+ 						}
+ 					};
+ 				};
+@@ -1011,27 +1018,14 @@ window.__ModuleLoader__.load({
+ 					locale: NS,
+ 					inject: injected
+ 				};
+-				let mounted = false;
+-				const disposeContextWait = scope.slots.inject("conversation.input.selector.context", () => {
+-					mounted = true;
+-					return scope.slots.register({
+-						name: "conversation.input.selector.context",
+-						...chipEntry
+-					}, BranchChip);
++				scope.slots.inject("conversation.input.dock", () => scope.slots.register({
++					name: "conversation.input.dock",
++					...chipEntry
++				}, BranchChip));
+ 				});
+-				fallbackTimer = setTimeout(() => {
+-					if (mounted) return;
+-					disposeContextWait();
+-					scope.slots.inject("conversation.input.dock", () => scope.slots.register({
+-						name: "conversation.input.dock",
+-						...chipEntry
+-					}, BranchChip));
+-				}, CONTEXT_FALLBACK_MS);
+-			});
+ 		}
+ 		//#endregion
+ 		exports.BranchChip = BranchChip;
+-		exports.CONTEXT_FALLBACK_MS = CONTEXT_FALLBACK_MS;
+ 		exports.apply = apply;
+ 		exports.inject = inject;
+ 		return module.exports;
+diff --git a/lib/index.js b/lib/index.js
+index dcfe28efa1a53e96d82d11b8bbae8d1497261109..878311864f6ccd529d206ea021b2efa53fdc6b23 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -582,6 +582,42 @@ const POLL_INTERVAL_MS = 2e3;
+ const HEARTBEAT_INTERVAL_MS = 15e3;
+ /** Request body size cap; larger bodies are destroyed rather than drained. */
+ const BODY_CAP_BYTES = 1 << 20;
++const REMOTE_PAIRED_PATHS = new Set([
++	"/git/status",
++	"/git/branches",
++	"/git/graph"
++]);
++/** True only for a real loopback socket whose Host also names loopback. */
++function isLoopbackRequest(req, host) {
++	const address = req.socket.remoteAddress?.toLowerCase();
++	if (address === void 0) return false;
++	const octets = (address.startsWith("::ffff:") ? address.slice(7) : address).split(".");
++	const loopbackSocket = address === "::1" || octets.length === 4 && octets[0] === "127" && octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255);
++	const hostname = host.hostname;
++	const hostOctets = hostname.split(".");
++	const loopbackHost = hostname === "localhost" || hostname === "[::1]" || hostOctets.length === 4 && hostOctets[0] === "127" && hostOctets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255);
++	return loopbackSocket && loopbackHost;
++}
++/** Authorize local operations, or the explicitly paired operation set. */
++function authorizeRequest(ctx, req, pairedAccess) {
++	if (req.headers["sec-fetch-site"] === "cross-site") return void 0;
++	const rawHost = req.headers.host;
++	if (typeof rawHost !== "string") return void 0;
++	let host;
++	try {
++		host = new URL(`http://${rawHost}`);
++	} catch {
++		return;
++	}
++	const origin = req.headers.origin;
++	if (origin !== void 0) try {
++		if (new URL(origin).host !== host.host) return void 0;
++	} catch {
++		return;
++	}
++	if (isLoopbackRequest(req, host)) return "loopback";
++	return pairedAccess && ctx.bail(ctx, "remote-web-ui/authorize-http", req) === "allow" ? "paired" : void 0;
++}
+ /** Read a JSON request body into an unknown value; null when unparseable. */
+ async function readJsonBody(req) {
+ 	const chunks = [];
+@@ -626,10 +662,30 @@ function registerGitRoutes(ctx, service) {
+ 	const subscribers = /* @__PURE__ */ new Set();
+ 	let pollTimer;
+ 	let heartbeatTimer;
++	const stopIdleTimers = () => {
++		if (subscribers.size !== 0) return;
++		if (pollTimer !== void 0) clearInterval(pollTimer);
++		if (heartbeatTimer !== void 0) clearInterval(heartbeatTimer);
++		pollTimer = void 0;
++		heartbeatTimer = void 0;
++	};
++	const closeSubscriber = (subscriber, endResponse) => {
++		if (!subscribers.delete(subscriber)) return;
++		if (endResponse) subscriber.res.end();
++		stopIdleTimers();
++	};
++	const revokeUnauthorizedSubscribers = () => {
++		for (const subscriber of subscribers) if (subscriber.paired && authorizeRequest(ctx, subscriber.req, true) !== "paired") closeSubscriber(subscriber, true);
++	};
++	const revokeDeniedSubscribers = () => {
++		for (const subscriber of subscribers) if (subscriber.paired && ctx.bail(ctx, "remote-web-ui/authorize-http", subscriber.req) === "deny") closeSubscriber(subscriber, true);
++	};
+ 	const push = (subscriber, payload) => {
++		if (!subscribers.has(subscriber)) return;
+ 		subscriber.res.write(`event: change\ndata: ${JSON.stringify(payload)}\n\n`);
+ 	};
+ 	const poll = () => {
++		revokeUnauthorizedSubscribers();
+ 		for (const subscriber of subscribers) service.status(subscriber.path).then((status) => {
+ 			const key = status === null ? "no-repo" : `${status.root}|${status.branch}|${status.head}`;
+ 			if (key === subscriber.last) return;
+@@ -648,12 +704,17 @@ function registerGitRoutes(ctx, service) {
+ 			res.end();
+ 			return;
+ 		}
++		const pathname = new URL(req.url ?? "/", "http://x").pathname;
++		if (authorizeRequest(ctx, req, REMOTE_PAIRED_PATHS.has(pathname)) === void 0) {
++			res.writeHead(403);
++			res.end("forbidden");
++			return;
++		}
+ 		if (!(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
+ 			res.writeHead(415);
+ 			res.end();
+ 			return;
+ 		}
+-		const pathname = new URL(req.url ?? "/", "http://x").pathname;
+ 		const payload = await readJsonBody(req);
+ 		const path = pathOf(payload);
+ 		if (path === null) {
+@@ -699,6 +760,12 @@ function registerGitRoutes(ctx, service) {
+ 		}
+ 	};
+ 	const sse = (req, res) => {
++		const access = authorizeRequest(ctx, req, true);
++		if (access === void 0) {
++			res.writeHead(403);
++			res.end();
++			return;
++		}
+ 		const path = new URL(req.url ?? "/", "http://x").searchParams.get("path");
+ 		if (path === null || path === "") {
+ 			res.writeHead(400);
+@@ -714,37 +781,38 @@ function registerGitRoutes(ctx, service) {
+ 		const subscriber = {
+ 			path,
+ 			last: "",
++			paired: access === "paired",
++			req,
+ 			res
+ 		};
+ 		subscribers.add(subscriber);
+ 		if (pollTimer === void 0) pollTimer = setInterval(poll, POLL_INTERVAL_MS);
+ 		if (heartbeatTimer === void 0) heartbeatTimer = setInterval(() => {
++			revokeUnauthorizedSubscribers();
+ 			for (const current of subscribers) current.res.write(": ping\n\n");
+ 		}, HEARTBEAT_INTERVAL_MS);
+ 		req.on("close", () => {
+-			subscribers.delete(subscriber);
+-			if (subscribers.size === 0) {
+-				if (pollTimer !== void 0) clearInterval(pollTimer);
+-				if (heartbeatTimer !== void 0) clearInterval(heartbeatTimer);
+-				pollTimer = void 0;
+-				heartbeatTimer = void 0;
+-			}
++			closeSubscriber(subscriber, false);
+ 		});
+ 	};
+-	const disposers = [ctx.webServer.register({
+-		kind: "prefix",
+-		path: "/git",
+-		handler
+-	}), ctx.webServer.register({
+-		kind: "exact",
+-		path: "/git/events",
+-		handler: sse
+-	})];
++	const disposers = [
++		ctx.on("remote-web-ui/authorization-changed", revokeDeniedSubscribers),
++		ctx.webServer.register({
++			kind: "prefix",
++			path: "/git",
++			handler
++		}),
++		ctx.webServer.register({
++			kind: "exact",
++			path: "/git/events",
++			handler: sse
++		})
++	];
+ 	return () => {
+ 		for (const dispose of disposers) dispose();
+ 		if (pollTimer !== void 0) clearInterval(pollTimer);
+ 		if (heartbeatTimer !== void 0) clearInterval(heartbeatTimer);
+-		for (const subscriber of subscribers) subscriber.res.end();
++		for (const subscriber of [...subscribers]) closeSubscriber(subscriber, true);
+ 		subscribers.clear();
+ 	};
+ }
+diff --git a/lib/types/client/chips/BranchChip.d.ts b/lib/types/client/chips/BranchChip.d.ts
+index f04e2589438400ee7b19fab9f38e56d9e00b2d6d..e200014fa9e7fc374c8600bd598ab53bc6878d3c 100644
+--- a/lib/types/client/chips/BranchChip.d.ts
++++ b/lib/types/client/chips/BranchChip.d.ts
+@@ -1,23 +1,16 @@
+ /**
+- * The git branch selector chip, mounted above the input card. Preferred
+- * seat is the selector row's context hole
+- * (`conversation.input.selector.context`, session-maybe) right beside the
+- * official workspace selector; on shells that dropped the hole (rc.6) the
+- * chip falls back to `conversation.input.dock` (session-scoped), so it
+- * mounts once a session is active there. The session-maybe seat keeps the
+- * chip mounted in every phase — hero (blank session) included — and the
+- * chip hides itself only when its data source is absent (no session cwd,
+- * or not a git repository). The component consumes only the props common
+- * to both seats (the session id, the inject face, the locale seat).
++ * The git branch selector chip, mounted above the input card through the
++ * session-scoped `conversation.input.dock`. It hides itself when its data
++ * source is absent (no session cwd, or not a git repository).
+  * @module dsh-git-graph/client/chips/BranchChip
+  */
+ import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots';
+ import type { GitGraphInjected } from '../index.ts';
+-/** Full props of the branch chip: either seat's runtime share (the session-maybe context hole or the session-scoped dock fallback) + the git-graph inject face + the locale seat. */
+-export type BranchChipProps = (PropsRuntime<'conversation.input.selector.context'> | PropsRuntime<'conversation.input.dock'>) & GitGraphInjected & PropsLocale<'git-graph'>;
++/** Full props of the branch chip: dock runtime share, git verbs, and locale. */
++export type BranchChipProps = PropsRuntime<'conversation.input.dock'> & GitGraphInjected & PropsLocale<'git-graph'>;
+ /**
+  * The git branch selector chip.
+- * @param props - the composed entry props of whichever seat it mounted in.
++ * @param props - the composed input-dock entry props.
+  */
+ export declare function BranchChip(props: BranchChipProps): import("react").JSX.Element | null;
+ //# sourceMappingURL=BranchChip.d.ts.map
+\ No newline at end of file
+diff --git a/lib/types/client/chips/BranchChip.d.ts.map b/lib/types/client/chips/BranchChip.d.ts.map
+index da3fa81a0f41611eb9eb13334d0347d401238c43..8d700c08a32330de063c9723215177235fda0a92 100644
+--- a/lib/types/client/chips/BranchChip.d.ts.map
++++ b/lib/types/client/chips/BranchChip.d.ts.map
+@@ -1 +1 @@
+-{"version":3,"file":"BranchChip.d.ts","sourceRoot":"","sources":["../../../../src/client/chips/BranchChip.tsx"],"names":[],"mappings":"AAAA;;;;;;;;;;;;GAYG;AAIH,OAAO,KAAK,EAAE,WAAW,EAAE,YAAY,EAAE,MAAM,kCAAkC,CAAA;AAEjF,OAAO,KAAK,EAAE,gBAAgB,EAAE,MAAM,aAAa,CAAA;AAOnD,qLAAqL;AACrL,MAAM,MAAM,eAAe,GACzB,CAAC,YAAY,CAAC,qCAAqC,CAAC,GAAG,YAAY,CAAC,yBAAyB,CAAC,CAAC,GAC7F,gBAAgB,GAChB,WAAW,CAAC,WAAW,CAAC,CAAA;AAE5B;;;GAGG;AACH,wBAAgB,UAAU,CAAC,KAAK,EAAE,eAAe,sCAiGhD"}
+\ No newline at end of file
++{"version":3,"file":"BranchChip.d.ts","sourceRoot":"","sources":["../../../../src/client/chips/BranchChip.tsx"],"names":[],"mappings":"AAAA;;;;;GAKG;AAIH,OAAO,KAAK,EAAE,WAAW,EAAE,YAAY,EAAE,MAAM,kCAAkC,CAAA;AAEjF,OAAO,KAAK,EAAE,gBAAgB,EAAE,MAAM,aAAa,CAAA;AAOnD,gFAAgF;AAChF,MAAM,MAAM,eAAe,GACzB,YAAY,CAAC,yBAAyB,CAAC,GACrC,gBAAgB,GAChB,WAAW,CAAC,WAAW,CAAC,CAAA;AAE5B;;;GAGG;AACH,wBAAgB,UAAU,CAAC,KAAK,EAAE,eAAe,sCAkGhD"}
+\ No newline at end of file
+diff --git a/lib/types/client/chips/BranchChip.js b/lib/types/client/chips/BranchChip.js
+index e07bef4e9120dd2cf7300ffcc8974d9b3e07a232..4ab9d965eb135158f7e140d49fbc566bdc443910 100644
+--- a/lib/types/client/chips/BranchChip.js
++++ b/lib/types/client/chips/BranchChip.js
+@@ -1,15 +1,8 @@
+ import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
+ /**
+- * The git branch selector chip, mounted above the input card. Preferred
+- * seat is the selector row's context hole
+- * (`conversation.input.selector.context`, session-maybe) right beside the
+- * official workspace selector; on shells that dropped the hole (rc.6) the
+- * chip falls back to `conversation.input.dock` (session-scoped), so it
+- * mounts once a session is active there. The session-maybe seat keeps the
+- * chip mounted in every phase — hero (blank session) included — and the
+- * chip hides itself only when its data source is absent (no session cwd,
+- * or not a git repository). The component consumes only the props common
+- * to both seats (the session id, the inject face, the locale seat).
++ * The git branch selector chip, mounted above the input card through the
++ * session-scoped `conversation.input.dock`. It hides itself when its data
++ * source is absent (no session cwd, or not a git repository).
+  * @module dsh-git-graph/client/chips/BranchChip
+  */
+ import { useCallback, useEffect, useState } from 'react';
+@@ -21,7 +14,7 @@ import { GraphDialog } from "../graph/GraphDialog.js";
+ import css from './context.module.css';
+ /**
+  * The git branch selector chip.
+- * @param props - the composed entry props of whichever seat it mounted in.
++ * @param props - the composed input-dock entry props.
+  */
+ export function BranchChip(props) {
+     /** Repository state: undefined = loading, null = not a repository, else the snapshot. */
+@@ -76,11 +69,11 @@ export function BranchChip(props) {
+     const openBranchPopover = () => {
+         setBranchOpen(open => !open);
+     };
+-    return (_jsxs("div", { className: css.anchor, children: [_jsx(Chip, { icon: _jsx(IconBranchOutline16, { size: 14 }), label: repo.branch === '' ? props.t('branch.detached') : repo.branch, ariaLabel: props.t('chip.aria.branch'), open: branchOpen, onClick: openBranchPopover }), branchOpen && branchesView !== null && (_jsx(BranchPopover, { view: branchesView, onSwitch: (branch) => props.switchBranch(props.sessionId, branch), onSwitched: refetch, onCreate: () => {
++    return (_jsxs("div", { className: css.anchor, children: [_jsx(Chip, { icon: _jsx(IconBranchOutline16, { size: 14 }), label: repo.branch === '' ? props.t('branch.detached') : repo.branch, ariaLabel: props.t('chip.aria.branch'), open: branchOpen, onClick: openBranchPopover }), branchOpen && branchesView !== null && (_jsx(BranchPopover, { view: branchesView, readOnly: props.readOnly, onSwitch: (branch) => props.switchBranch(props.sessionId, branch), onSwitched: refetch, onCreate: () => {
+                     setBranchOpen(false);
+                     setCreateOpen(true);
+                 }, onGraph: () => {
+                     setBranchOpen(false);
+                     setGraphOpen(true);
+-                }, onClose: () => { setBranchOpen(false); }, t: props.t })), createOpen && (_jsx(CreateBranchDialog, { onCreate: (name) => props.createBranch(props.sessionId, name), onClose: closeCreate, t: props.t })), graphOpen && (_jsx(GraphDialog, { graph: (limit) => props.graph(props.sessionId, limit), onClose: () => { setGraphOpen(false); }, t: props.t }))] }));
++                }, onClose: () => { setBranchOpen(false); }, t: props.t })), !props.readOnly && createOpen && (_jsx(CreateBranchDialog, { onCreate: (name) => props.createBranch(props.sessionId, name), onClose: closeCreate, t: props.t })), graphOpen && (_jsx(GraphDialog, { graph: (limit) => props.graph(props.sessionId, limit), onClose: () => { setGraphOpen(false); }, t: props.t }))] }));
+ }
+diff --git a/lib/types/client/chips/BranchPopover.d.ts b/lib/types/client/chips/BranchPopover.d.ts
+index 06f3392e8b6e2815099b2ceac97f4b38cf4fe393..f6911cf775953ed7cb1742e252adb2ef1a021803 100644
+--- a/lib/types/client/chips/BranchPopover.d.ts
++++ b/lib/types/client/chips/BranchPopover.d.ts
+@@ -10,6 +10,8 @@ import type { GitGraphKey } from '../locales.ts';
+ /** Props of the branch picker popover. */
+ export interface BranchPopoverProps {
+     view: BranchesView;
++    /** Remote pages can inspect repository state but cannot mutate it. */
++    readOnly: boolean;
+     /** Workspace-level switch verb; resolves to a stable git error on rejection. */
+     onSwitch: (branch: string) => Promise<SwitchResult>;
+     /** Fired after a successful switch (the owner refetches its status). */
+@@ -26,5 +28,5 @@ export interface BranchPopoverProps {
+  * The branch picker popover.
+  * @param props - see {@link BranchPopoverProps}.
+  */
+-export declare function BranchPopover({ view, onSwitch, onSwitched, onCreate, onGraph, onClose, t }: BranchPopoverProps): import("react").JSX.Element;
++export declare function BranchPopover({ view, readOnly, onSwitch, onSwitched, onCreate, onGraph, onClose, t }: BranchPopoverProps): import("react").JSX.Element;
+ //# sourceMappingURL=BranchPopover.d.ts.map
+\ No newline at end of file
+diff --git a/lib/types/client/chips/BranchPopover.d.ts.map b/lib/types/client/chips/BranchPopover.d.ts.map
+index 7c09f3f3061f5a656c900b92e49a0aa9ae2b5670..cd2015135cc33b09797be0d926abb28b96d733e6 100644
+--- a/lib/types/client/chips/BranchPopover.d.ts.map
++++ b/lib/types/client/chips/BranchPopover.d.ts.map
+@@ -1 +1 @@
+-{"version":3,"file":"BranchPopover.d.ts","sourceRoot":"","sources":["../../../../src/client/chips/BranchPopover.tsx"],"names":[],"mappings":"AAAA;;;;;GAKG;AAIH,OAAO,KAAK,EAAE,SAAS,EAAE,MAAM,kCAAkC,CAAA;AACjE,OAAO,KAAK,EAAE,YAAY,EAAE,YAAY,EAAE,MAAM,qBAAqB,CAAA;AACrE,OAAO,KAAK,EAAE,WAAW,EAAE,MAAM,eAAe,CAAA;AAKhD,0CAA0C;AAC1C,MAAM,WAAW,kBAAkB;IACjC,IAAI,EAAE,YAAY,CAAA;IAClB,gFAAgF;IAChF,QAAQ,EAAE,CAAC,MAAM,EAAE,MAAM,KAAK,OAAO,CAAC,YAAY,CAAC,CAAA;IACnD,wEAAwE;IACxE,UAAU,EAAE,MAAM,IAAI,CAAA;IACtB,qCAAqC;IACrC,QAAQ,EAAE,MAAM,IAAI,CAAA;IACpB,gCAAgC;IAChC,OAAO,EAAE,MAAM,IAAI,CAAA;IACnB,gEAAgE;IAChE,OAAO,EAAE,MAAM,IAAI,CAAA;IACnB,CAAC,EAAE,SAAS,CAAC,WAAW,CAAC,CAAA;CAC1B;AAKD;;;GAGG;AACH,wBAAgB,aAAa,CAAC,EAAE,IAAI,EAAE,QAAQ,EAAE,UAAU,EAAE,QAAQ,EAAE,OAAO,EAAE,OAAO,EAAE,CAAC,EAAE,EAAE,kBAAkB,+BAqF9G"}
+\ No newline at end of file
++{"version":3,"file":"BranchPopover.d.ts","sourceRoot":"","sources":["../../../../src/client/chips/BranchPopover.tsx"],"names":[],"mappings":"AAAA;;;;;GAKG;AAIH,OAAO,KAAK,EAAE,SAAS,EAAE,MAAM,kCAAkC,CAAA;AACjE,OAAO,KAAK,EAAE,YAAY,EAAE,YAAY,EAAE,MAAM,qBAAqB,CAAA;AACrE,OAAO,KAAK,EAAE,WAAW,EAAE,MAAM,eAAe,CAAA;AAKhD,0CAA0C;AAC1C,MAAM,WAAW,kBAAkB;IACjC,IAAI,EAAE,YAAY,CAAA;IAClB,sEAAsE;IACtE,QAAQ,EAAE,OAAO,CAAA;IACjB,gFAAgF;IAChF,QAAQ,EAAE,CAAC,MAAM,EAAE,MAAM,KAAK,OAAO,CAAC,YAAY,CAAC,CAAA;IACnD,wEAAwE;IACxE,UAAU,EAAE,MAAM,IAAI,CAAA;IACtB,qCAAqC;IACrC,QAAQ,EAAE,MAAM,IAAI,CAAA;IACpB,gCAAgC;IAChC,OAAO,EAAE,MAAM,IAAI,CAAA;IACnB,gEAAgE;IAChE,OAAO,EAAE,MAAM,IAAI,CAAA;IACnB,CAAC,EAAE,SAAS,CAAC,WAAW,CAAC,CAAA;CAC1B;AAKD;;;GAGG;AACH,wBAAgB,aAAa,CAAC,EAAE,IAAI,EAAE,QAAQ,EAAE,QAAQ,EAAE,UAAU,EAAE,QAAQ,EAAE,OAAO,EAAE,OAAO,EAAE,CAAC,EAAE,EAAE,kBAAkB,+BAwFxH"}
+\ No newline at end of file
+diff --git a/lib/types/client/chips/BranchPopover.js b/lib/types/client/chips/BranchPopover.js
+index 19fbf268f4c981fb21392cd2ebeb78a7c407e095..1a7342b376e534b3d6fe4278766763d3be9d1891 100644
+--- a/lib/types/client/chips/BranchPopover.js
++++ b/lib/types/client/chips/BranchPopover.js
+@@ -16,7 +16,7 @@ const SUCCESS_DISMISS_MS = 900;
+  * The branch picker popover.
+  * @param props - see {@link BranchPopoverProps}.
+  */
+-export function BranchPopover({ view, onSwitch, onSwitched, onCreate, onGraph, onClose, t }) {
++export function BranchPopover({ view, readOnly, onSwitch, onSwitched, onCreate, onGraph, onClose, t }) {
+     const [query, setQuery] = useState('');
+     const [pending, setPending] = useState(null);
+     const [error, setError] = useState(null);
+@@ -33,7 +33,7 @@ export function BranchPopover({ view, onSwitch, onSwitched, onCreate, onGraph, o
+         return view.branches.filter(branch => branch.name.toLowerCase().includes(needle));
+     }, [view.branches, query]);
+     const switchTo = (branch) => {
+-        if (pending !== null)
++        if (readOnly || pending !== null)
+             return;
+         setPending(branch);
+         setError(null);
+@@ -49,7 +49,7 @@ export function BranchPopover({ view, onSwitch, onSwitched, onCreate, onGraph, o
+         }).finally(() => { setPending(null); });
+     };
+     return (_jsxs(_Fragment, { children: [_jsx(Backdrop, { onClose: onClose }), _jsxs("div", { className: css.popover, role: "listbox", "aria-label": t('branch.search'), "data-gitgraph-popover": true, children: [_jsxs("div", { className: css.searchBox, children: [_jsx(IconSearchOutline16, { size: 14 }), _jsx("input", { className: css.searchInput, value: query, onChange: (event) => { setQuery(event.target.value); }, placeholder: t('branch.search'), autoFocus: true })] }), view.dirtyFiles > 0
+-                        && _jsx("div", { className: css.dirty, children: t('branch.dirty', { count: view.dirtyFiles }) }), _jsx("div", { className: css.list, children: filtered.length === 0
++                        && _jsx("div", { className: css.dirty, children: t('branch.dirty', { count: view.dirtyFiles }) }), readOnly && _jsx("div", { className: css.empty, children: t('branch.remoteReadOnly') }), _jsx("div", { className: css.list, children: filtered.length === 0
+                             ? _jsx("div", { className: css.empty, children: t('branch.empty') })
+-                            : filtered.map(branch => (_jsxs("button", { type: "button", className: cx(css.item, branch.current && css.itemActive), onClick: () => { switchTo(branch.name); }, role: "option", "aria-selected": branch.current, disabled: pending !== null, children: [_jsx(IconBranchOutline16, { size: 14 }), _jsx("span", { className: css.itemText, children: _jsx("span", { className: css.itemName, title: branch.name, children: branch.name }) }), branch.current && _jsx(IconCheckOutline14, { className: css.check, size: 14 })] }, branch.name))) }), success !== null && _jsx("div", { className: cx(css.notice, css.noticeOk), children: success }), error !== null && _jsx("div", { className: css.notice, children: error }), _jsxs("div", { className: css.footer, children: [_jsxs("button", { type: "button", className: css.footerItem, onClick: onCreate, children: [_jsx(IconBranchOutline16, { size: 14 }), t('branch.create')] }), _jsxs("button", { type: "button", className: css.footerItem, onClick: onGraph, children: [_jsx(IconBranchOutline16, { size: 14 }), t('branch.graph')] })] })] })] }));
++                            : filtered.map(branch => (_jsxs("button", { type: "button", className: cx(css.item, branch.current && css.itemActive), onClick: () => { switchTo(branch.name); }, role: "option", "aria-selected": branch.current, disabled: readOnly || pending !== null, children: [_jsx(IconBranchOutline16, { size: 14 }), _jsx("span", { className: css.itemText, children: _jsx("span", { className: css.itemName, title: branch.name, children: branch.name }) }), branch.current && _jsx(IconCheckOutline14, { className: css.check, size: 14 })] }, branch.name))) }), success !== null && _jsx("div", { className: cx(css.notice, css.noticeOk), children: success }), error !== null && _jsx("div", { className: css.notice, children: error }), _jsxs("div", { className: css.footer, children: [!readOnly && (_jsxs("button", { type: "button", className: css.footerItem, onClick: onCreate, children: [_jsx(IconBranchOutline16, { size: 14 }), t('branch.create')] })), _jsxs("button", { type: "button", className: css.footerItem, onClick: onGraph, children: [_jsx(IconBranchOutline16, { size: 14 }), t('branch.graph')] })] })] })] }));
+ }
+diff --git a/lib/types/client/index.d.ts b/lib/types/client/index.d.ts
+index 89510e808a3558863a7742ce00efe7eeb9156866..3869d33e8fce0ce1c1b82f355bd609883bfcc56f 100644
+--- a/lib/types/client/index.d.ts
++++ b/lib/types/client/index.d.ts
+@@ -1,25 +1,13 @@
+ /**
+  * Git-graph surface plugin, browser half: the git branch selector chip,
+- * docked above the input card. Preferred seat is the input selector row's
+- * context hole (`conversation.input.selector.context`, a session-maybe
+- * list slot declared and rendered by newer shipped ui-conversation shells),
+- * right beside the official workspace selector; the published npm SDK
+- * (rc.6) dropped that hole, so the chip waits on its declaration for
+- * {@link CONTEXT_FALLBACK_MS} and then falls back to
+- * `conversation.input.dock` (the 0.1.9 seat). All git facts arrive
++ * docked above the input card through `conversation.input.dock`. All git facts arrive
+  * through the host /git routes (this package's own host half); the inject
+  * face carries the business verbs, the components stay pure props.
+  *
+- * The context hole is session-maybe: the chip stays mounted from cold start
+- * through the active phase and hides itself when its data source is absent
+- * (no session cwd, or not a git repository) — no workspace selector lives
+- * here, the official selector chip docked above the input card owns that
+- * surface. The dock fallback is session-scoped: the chip mounts once a
+- * session is active, so the blank hero phase has no seat there (the
+- * accepted rc.6 downgrade). Revision 0be6546 moved the chip back to the
+- * context hole without a fallback, so on rc.6 shells the inject wait never
+- * resolved and the chip disappeared. The published npm SDK (rc.6) dropped
+- * the hole's type, so it is spelled locally below.
++ * The dock is session-scoped, so the chip mounts once a session is active
++ * and hides itself when its data source is absent (no session cwd, or not a
++ * git repository). Registration stays inside the declaring slot's lifecycle;
++ * there is no delayed callback that can outlive an unloaded plugin generation.
+  * @module dsh-git-graph/client
+  */
+ import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client';
+@@ -32,32 +20,13 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
+         /** The git-graph chip copy. */
+         'git-graph': GitGraphKey;
+     }
+-    interface SlotMap {
+-        /**
+-         * The input selector context-chip hole: feature chips rendered right
+-         * after the workspace selector (the git branch selector's seat).
+-         * Session-maybe: entries stay mounted without a session and hide
+-         * themselves when their data source is absent.
+-         *
+-         * Declared and rendered by the running dsh web shell
+-         * (ui-conversation's InputSelectorRow); the published npm SDK (rc.6)
+-         * dropped this hole, so it is spelled locally to keep the chip's
+-         * registration type-checked without depending on the sibling SDK surface.
+-         */
+-        'conversation.input.selector.context': {
+-            kind: 'list';
+-            scope: 'session-maybe';
+-            owner: InputSelectorContextOwnerProps;
+-        };
+-    }
+-}
+-/** Owner share of the input selector context-chip hole (empty by contract). */
+-export interface InputSelectorContextOwnerProps {
+ }
+-/** Required services: slots for the selector-context entry, sessions for the cwd lookup, locale for the copy. */
++/** Required services: slots for the dock entry, sessions for the cwd lookup, locale for the copy. */
+ export declare const inject: string[];
+ /** Injected business face of the branch chip: git verbs, keyed by the current session id. */
+ export interface GitGraphInjected {
++    /** Whether this browser may inspect Git state but must not mutate the repository. */
++    readOnly: boolean;
+     /** The workspace repository snapshot; null when not a repository. */
+     repoStatus: (sessionId: SessionId | undefined) => Promise<RepoStatus | null>;
+     /** Local branch list with the current branch marked. */
+@@ -72,15 +41,7 @@ export interface GitGraphInjected {
+     subscribeChanges: (sessionId: SessionId | undefined, onChange: () => void) => () => void;
+ }
+ /**
+- * How long the chip waits for the selector-context declaration before
+- * falling back to the input dock. The window covers the shell's first
+- * render of the input selector row after the conversation service is up;
+- * shells that never declare the hole (rc.6) land on the dock after it.
+- */
+-export declare const CONTEXT_FALLBACK_MS = 2000;
+-/**
+- * Client plugin body: the branch chip entry with its git verbs, on the
+- * selector-context hole with an input-dock fallback.
++ * Client plugin body: the branch chip entry with its git verbs on the input dock.
+  * @param ctx - client root context.
+  */
+ export declare function apply(ctx: ClientContext): void;
+diff --git a/lib/types/client/index.d.ts.map b/lib/types/client/index.d.ts.map
+index aeed76d507fb86e9ffcde85d386a0dd1819d11ac..d8cd47057492d59cadf1d471f14882e0ccf213fb 100644
+--- a/lib/types/client/index.d.ts.map
++++ b/lib/types/client/index.d.ts.map
+@@ -1 +1 @@
+-{"version":3,"file":"index.d.ts","sourceRoot":"","sources":["../../../src/client/index.ts"],"names":[],"mappings":"AAAA;;;;;;;;;;;;;;;;;;;;;;;GAuBG;AAEH,OAAO,KAAK,EAAE,aAAa,EAAE,SAAS,EAAE,MAAM,wCAAwC,CAAA;AAOtF,OAAO,KAAK,EACV,YAAY,EAAY,SAAS,EAAE,UAAU,EAAE,YAAY,EAC5D,MAAM,kBAAkB,CAAA;AAGzB,OAAO,EAAU,KAAK,WAAW,EAAE,MAAM,cAAc,CAAA;AAEvD,YAAY,EAAE,WAAW,EAAE,MAAM,cAAc,CAAA;AAC/C,OAAO,EAAE,UAAU,EAAE,MAAM,wBAAwB,CAAA;AAEnD,OAAO,QAAQ,kCAAkC,CAAC;IAChD,UAAU,kBAAkB;QAC1B,+BAA+B;QAC/B,WAAW,EAAE,WAAW,CAAA;KACzB;IAED,UAAU,OAAO;QACf;;;;;;;;;;WAUG;QACH,qCAAqC,EAAE;YACrC,IAAI,EAAE,MAAM,CAAA;YACZ,KAAK,EAAE,eAAe,CAAA;YACtB,KAAK,EAAE,8BAA8B,CAAA;SACtC,CAAA;KACF;CACF;AAED,+EAA+E;AAC/E,MAAM,WAAW,8BAA8B;CAAG;AAKlD,iHAAiH;AACjH,eAAO,MAAM,MAAM,UAAgD,CAAA;AAEnE,6FAA6F;AAC7F,MAAM,WAAW,gBAAgB;IAC/B,qEAAqE;IACrE,UAAU,EAAE,CAAC,SAAS,EAAE,SAAS,GAAG,SAAS,KAAK,OAAO,CAAC,UAAU,GAAG,IAAI,CAAC,CAAA;IAC5E,wDAAwD;IACxD,QAAQ,EAAE,CAAC,SAAS,EAAE,SAAS,GAAG,SAAS,KAAK,OAAO,CAAC,YAAY,GAAG,IAAI,CAAC,CAAA;IAC5E,wDAAwD;IACxD,YAAY,EAAE,CAAC,SAAS,EAAE,SAAS,GAAG,SAAS,EAAE,MAAM,EAAE,MAAM,KAAK,OAAO,CAAC,YAAY,CAAC,CAAA;IACzF,+DAA+D;IAC/D,YAAY,EAAE,CAAC,SAAS,EAAE,SAAS,GAAG,SAAS,EAAE,IAAI,EAAE,MAAM,KAAK,OAAO,CAAC,YAAY,CAAC,CAAA;IACvF,iCAAiC;IACjC,KAAK,EAAE,CAAC,SAAS,EAAE,SAAS,GAAG,SAAS,EAAE,KAAK,CAAC,EAAE,MAAM,KAAK,OAAO,CAAC,SAAS,GAAG,IAAI,CAAC,CAAA;IACtF,oEAAoE;IACpE,gBAAgB,EAAE,CAAC,SAAS,EAAE,SAAS,GAAG,SAAS,EAAE,QAAQ,EAAE,MAAM,IAAI,KAAK,MAAM,IAAI,CAAA;CACzF;AAKD;;;;;GAKG;AACH,eAAO,MAAM,mBAAmB,OAAO,CAAA;AAEvC;;;;GAIG;AACH,wBAAgB,KAAK,CAAC,GAAG,EAAE,aAAa,GAAG,IAAI,CAkG9C"}
+\ No newline at end of file
++{"version":3,"file":"index.d.ts","sourceRoot":"","sources":["../../../src/client/index.ts"],"names":[],"mappings":"AAAA;;;;;;;;;;;GAWG;AAEH,OAAO,KAAK,EAAE,aAAa,EAAE,SAAS,EAAE,MAAM,wCAAwC,CAAA;AAMtF,OAAO,KAAK,EACV,YAAY,EAAY,SAAS,EAAE,UAAU,EAAE,YAAY,EAC5D,MAAM,kBAAkB,CAAA;AAGzB,OAAO,EAAU,KAAK,WAAW,EAAE,MAAM,cAAc,CAAA;AAEvD,YAAY,EAAE,WAAW,EAAE,MAAM,cAAc,CAAA;AAC/C,OAAO,EAAE,UAAU,EAAE,MAAM,wBAAwB,CAAA;AAEnD,OAAO,QAAQ,kCAAkC,CAAC;IAChD,UAAU,kBAAkB;QAC1B,+BAA+B;QAC/B,WAAW,EAAE,WAAW,CAAA;KACzB;CAEF;AAKD,qGAAqG;AACrG,eAAO,MAAM,MAAM,UAAgD,CAAA;AAEnE,6FAA6F;AAC7F,MAAM,WAAW,gBAAgB;IAC/B,qFAAqF;IACrF,QAAQ,EAAE,OAAO,CAAA;IACjB,qEAAqE;IACrE,UAAU,EAAE,CAAC,SAAS,EAAE,SAAS,GAAG,SAAS,KAAK,OAAO,CAAC,UAAU,GAAG,IAAI,CAAC,CAAA;IAC5E,wDAAwD;IACxD,QAAQ,EAAE,CAAC,SAAS,EAAE,SAAS,GAAG,SAAS,KAAK,OAAO,CAAC,YAAY,GAAG,IAAI,CAAC,CAAA;IAC5E,wDAAwD;IACxD,YAAY,EAAE,CAAC,SAAS,EAAE,SAAS,GAAG,SAAS,EAAE,MAAM,EAAE,MAAM,KAAK,OAAO,CAAC,YAAY,CAAC,CAAA;IACzF,+DAA+D;IAC/D,YAAY,EAAE,CAAC,SAAS,EAAE,SAAS,GAAG,SAAS,EAAE,IAAI,EAAE,MAAM,KAAK,OAAO,CAAC,YAAY,CAAC,CAAA;IACvF,iCAAiC;IACjC,KAAK,EAAE,CAAC,SAAS,EAAE,SAAS,GAAG,SAAS,EAAE,KAAK,CAAC,EAAE,MAAM,KAAK,OAAO,CAAC,SAAS,GAAG,IAAI,CAAC,CAAA;IACtF,oEAAoE;IACpE,gBAAgB,EAAE,CAAC,SAAS,EAAE,SAAS,GAAG,SAAS,EAAE,QAAQ,EAAE,MAAM,IAAI,KAAK,MAAM,IAAI,CAAA;CACzF;AAKD;;;GAGG;AACH,wBAAgB,KAAK,CAAC,GAAG,EAAE,aAAa,GAAG,IAAI,CAqE9C"}
+\ No newline at end of file
+diff --git a/lib/types/client/index.js b/lib/types/client/index.js
+index bb93135589200d67be50c12b5ee9e752ee080d7b..de9c17ebaef1d394d74943685a5252c64a21c503 100644
+--- a/lib/types/client/index.js
++++ b/lib/types/client/index.js
+@@ -1,25 +1,13 @@
+ /**
+  * Git-graph surface plugin, browser half: the git branch selector chip,
+- * docked above the input card. Preferred seat is the input selector row's
+- * context hole (`conversation.input.selector.context`, a session-maybe
+- * list slot declared and rendered by newer shipped ui-conversation shells),
+- * right beside the official workspace selector; the published npm SDK
+- * (rc.6) dropped that hole, so the chip waits on its declaration for
+- * {@link CONTEXT_FALLBACK_MS} and then falls back to
+- * `conversation.input.dock` (the 0.1.9 seat). All git facts arrive
++ * docked above the input card through `conversation.input.dock`. All git facts arrive
+  * through the host /git routes (this package's own host half); the inject
+  * face carries the business verbs, the components stay pure props.
+  *
+- * The context hole is session-maybe: the chip stays mounted from cold start
+- * through the active phase and hides itself when its data source is absent
+- * (no session cwd, or not a git repository) — no workspace selector lives
+- * here, the official selector chip docked above the input card owns that
+- * surface. The dock fallback is session-scoped: the chip mounts once a
+- * session is active, so the blank hero phase has no seat there (the
+- * accepted rc.6 downgrade). Revision 0be6546 moved the chip back to the
+- * context hole without a fallback, so on rc.6 shells the inject wait never
+- * resolved and the chip disappeared. The published npm SDK (rc.6) dropped
+- * the hole's type, so it is spelled locally below.
++ * The dock is session-scoped, so the chip mounts once a session is active
++ * and hides itself when its data source is absent (no session cwd, or not a
++ * git repository). Registration stays inside the declaring slot's lifecycle;
++ * there is no delayed callback that can outlive an unloaded plugin generation.
+  * @module dsh-git-graph/client
+  */
+ import { GitApi, subscribeChanges } from "./api.js";
+@@ -28,37 +16,20 @@ import { en, zh } from "./locales.js";
+ export { BranchChip } from "./chips/BranchChip.js";
+ /** Dictionary namespace owned by this plugin. */
+ const NS = 'git-graph';
+-/** Required services: slots for the selector-context entry, sessions for the cwd lookup, locale for the copy. */
++/** Required services: slots for the dock entry, sessions for the cwd lookup, locale for the copy. */
+ export const inject = ['slots', 'sessions', 'connection', 'locale'];
+ /** The session-cwd lookup failure shared by the injected verbs. */
+ const NO_WORKSPACE = { code: 'workspace-unknown', message: 'session has no workspace' };
+ /**
+- * How long the chip waits for the selector-context declaration before
+- * falling back to the input dock. The window covers the shell's first
+- * render of the input selector row after the conversation service is up;
+- * shells that never declare the hole (rc.6) land on the dock after it.
+- */
+-export const CONTEXT_FALLBACK_MS = 2000;
+-/**
+- * Client plugin body: the branch chip entry with its git verbs, on the
+- * selector-context hole with an input-dock fallback.
++ * Client plugin body: the branch chip entry with its git verbs on the input dock.
+  * @param ctx - client root context.
+  */
+ export function apply(ctx) {
+     ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-git-graph: dictionaries');
++    const connection = ctx.get('connection');
+     const git = new GitApi();
+-    // The context-fallback timer, armed once the conversation seam is up and
+-    // cleared when this fiber unloads (the slot inject waits die with the
+-    // fiber too, so no seat survives an unload).
+-    let fallbackTimer;
+-    ctx.effect(() => () => {
+-        if (fallbackTimer !== undefined)
+-            clearTimeout(fallbackTimer);
+-    }, 'dsh-git-graph: context fallback timer');
+     // Conditional mount: the conversation service being up is the
+-    // registration-safe signal (the GoalDock/QueueDock seam). The chip then
+-    // prefers the selector-context hole and falls back to the input dock when
+-    // that declaration never arrives.
++    // registration-safe signal for the input dock.
+     ctx.inject(['slots', 'conversation', 'sessions'], (scope) => {
+         const sessions = scope.sessions;
+         /** The session's workspace root, resolved at call time from the sessions baseline. */
+@@ -73,6 +44,7 @@ export function apply(ctx) {
+                 return { ok: true, path: cwd };
+             };
+             return {
++                readOnly: !connection.isLoopback,
+                 repoStatus: async (sessionId) => {
+                     const resolved = pathOf(sessionId);
+                     if (!resolved.ok)
+@@ -116,26 +88,7 @@ export function apply(ctx) {
+                 },
+             };
+         };
+-        // The entry shape shared by both seats; each register call spells the
+-        // seat's literal name so its own declaration is checked.
+         const chipEntry = { id: 'git-graph', order: 100, locale: NS, inject: injected };
+-        // Declaration-aware with a fallback. A bare register() would throw on
+-        // shells that dropped the hole (SDK SlotCore.register rejects undeclared
+-        // slots), so both seats route through inject like the pet / remote-web-ui
+-        // entries. The preferred context wait resolves the moment the shell
+-        // declares the hole; when it never does (rc.6), the fallback disposes
+-        // that wait and moves the chip to the dock. Exactly one seat mounts: a
+-        // context declaration landing after the fallback finds the wait gone.
+-        let mounted = false;
+-        const disposeContextWait = scope.slots.inject('conversation.input.selector.context', () => {
+-            mounted = true;
+-            return scope.slots.register({ name: 'conversation.input.selector.context', ...chipEntry }, BranchChip);
+-        });
+-        fallbackTimer = setTimeout(() => {
+-            if (mounted)
+-                return;
+-            disposeContextWait();
+-            scope.slots.inject('conversation.input.dock', () => scope.slots.register({ name: 'conversation.input.dock', ...chipEntry }, BranchChip));
+-        }, CONTEXT_FALLBACK_MS);
++        scope.slots.inject('conversation.input.dock', () => scope.slots.register({ name: 'conversation.input.dock', ...chipEntry }, BranchChip));
+     });
+ }
+diff --git a/lib/types/client/locales.d.ts b/lib/types/client/locales.d.ts
+index 8fa3b80b623e86f23aee12e358737d0d1b859f63..cf4e3fb6ee1ca545a20f2788468d2ea45e5d8fd4 100644
+--- a/lib/types/client/locales.d.ts
++++ b/lib/types/client/locales.d.ts
+@@ -5,6 +5,7 @@ export declare const zh: {
+     'branch.empty': string;
+     'branch.detached': string;
+     'branch.dirty': string;
++    'branch.remoteReadOnly': string;
+     'branch.create': string;
+     'branch.graph': string;
+     'branch.createDialog.title': string;
+@@ -47,6 +48,7 @@ export declare const en: {
+     'branch.empty': string;
+     'branch.detached': string;
+     'branch.dirty': string;
++    'branch.remoteReadOnly': string;
+     'branch.create': string;
+     'branch.graph': string;
+     'branch.createDialog.title': string;
+diff --git a/lib/types/client/locales.d.ts.map b/lib/types/client/locales.d.ts.map
+index 2dc6759bf9b6a8ab1ba7c39a44363c6b4ddf3137..a7136715507ee454af6354fb5e07f9a68c13e60e 100644
+--- a/lib/types/client/locales.d.ts.map
++++ b/lib/types/client/locales.d.ts.map
+@@ -1 +1 @@
+-{"version":3,"file":"locales.d.ts","sourceRoot":"","sources":["../../../src/client/locales.ts"],"names":[],"mappings":"AAAA,6EAA6E;AAE7E,mEAAmE;AACnE,eAAO,MAAM,EAAE;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;CAsCmB,CAAA;AAElC,yCAAyC;AACzC,MAAM,MAAM,WAAW,GAAG,MAAM,OAAO,EAAE,CAAA;AAEzC,mEAAmE;AACnE,eAAO,MAAM,EAAE;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;CAsCwB,CAAA"}
+\ No newline at end of file
++{"version":3,"file":"locales.d.ts","sourceRoot":"","sources":["../../../src/client/locales.ts"],"names":[],"mappings":"AAAA,6EAA6E;AAE7E,mEAAmE;AACnE,eAAO,MAAM,EAAE;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;CAuCmB,CAAA;AAElC,yCAAyC;AACzC,MAAM,MAAM,WAAW,GAAG,MAAM,OAAO,EAAE,CAAA;AAEzC,mEAAmE;AACnE,eAAO,MAAM,EAAE;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;CAuCwB,CAAA"}
+\ No newline at end of file
+diff --git a/lib/types/client/locales.js b/lib/types/client/locales.js
+index 18232465a4d9b616ca6a3cc78f63660a043344c0..2f9a17b5206cc191f432c04680bbe31f18e382eb 100644
+--- a/lib/types/client/locales.js
++++ b/lib/types/client/locales.js
+@@ -5,6 +5,7 @@ export const zh = {
+     'branch.empty': '未找到匹配分支',
+     'branch.detached': '分离 HEAD',
+     'branch.dirty': '未提交的更改：{count} 个文件',
++    'branch.remoteReadOnly': '手机远程只读。切换或新建分支请回到电脑。',
+     'branch.create': '创建并检出新分支…',
+     'branch.graph': 'Git 图谱',
+     'branch.createDialog.title': '创建并检出新分支',
+@@ -45,6 +46,7 @@ export const en = {
+     'branch.empty': 'No matching branches',
+     'branch.detached': 'Detached HEAD',
+     'branch.dirty': 'Uncommitted changes: {count} files',
++    'branch.remoteReadOnly': 'Remote access is read-only. Switch or create branches on the computer.',
+     'branch.create': 'Create and switch to new branch…',
+     'branch.graph': 'Git Graph',
+     'branch.createDialog.title': 'Create and switch to new branch',
+diff --git a/src/client/chips/BranchChip.tsx b/src/client/chips/BranchChip.tsx
+index b8d4028d731721867eecd012d18eeced5a669497..0919498fd3ce7a362755f8aaba4fe57acd9eea6b 100644
+--- a/src/client/chips/BranchChip.tsx
++++ b/src/client/chips/BranchChip.tsx
+@@ -1,14 +1,7 @@
+ /**
+- * The git branch selector chip, mounted above the input card. Preferred
+- * seat is the selector row's context hole
+- * (`conversation.input.selector.context`, session-maybe) right beside the
+- * official workspace selector; on shells that dropped the hole (rc.6) the
+- * chip falls back to `conversation.input.dock` (session-scoped), so it
+- * mounts once a session is active there. The session-maybe seat keeps the
+- * chip mounted in every phase — hero (blank session) included — and the
+- * chip hides itself only when its data source is absent (no session cwd,
+- * or not a git repository). The component consumes only the props common
+- * to both seats (the session id, the inject face, the locale seat).
++ * The git branch selector chip, mounted above the input card through the
++ * session-scoped `conversation.input.dock`. It hides itself when its data
++ * source is absent (no session cwd, or not a git repository).
+  * @module dsh-git-graph/client/chips/BranchChip
+  */
+ 
+@@ -23,15 +16,15 @@ import { CreateBranchDialog } from './CreateBranchDialog.tsx'
+ import { GraphDialog } from '../graph/GraphDialog.tsx'
+ import css from './context.module.css'
+ 
+-/** Full props of the branch chip: either seat's runtime share (the session-maybe context hole or the session-scoped dock fallback) + the git-graph inject face + the locale seat. */
++/** Full props of the branch chip: dock runtime share, git verbs, and locale. */
+ export type BranchChipProps =
+-  (PropsRuntime<'conversation.input.selector.context'> | PropsRuntime<'conversation.input.dock'>)
++  PropsRuntime<'conversation.input.dock'>
+   & GitGraphInjected
+   & PropsLocale<'git-graph'>
+ 
+ /**
+  * The git branch selector chip.
+- * @param props - the composed entry props of whichever seat it mounted in.
++ * @param props - the composed input-dock entry props.
+  */
+ export function BranchChip(props: BranchChipProps) {
+   /** Repository state: undefined = loading, null = not a repository, else the snapshot. */
+@@ -100,6 +93,7 @@ export function BranchChip(props: BranchChipProps) {
+       {branchOpen && branchesView !== null && (
+         <BranchPopover
+           view={branchesView}
++          readOnly={props.readOnly}
+           onSwitch={(branch) => props.switchBranch(props.sessionId, branch)}
+           onSwitched={refetch}
+           onCreate={() => {
+@@ -114,7 +108,7 @@ export function BranchChip(props: BranchChipProps) {
+           t={props.t}
+         />
+       )}
+-      {createOpen && (
++      {!props.readOnly && createOpen && (
+         <CreateBranchDialog
+           onCreate={(name) => props.createBranch(props.sessionId, name)}
+           onClose={closeCreate}
+diff --git a/src/client/chips/BranchPopover.tsx b/src/client/chips/BranchPopover.tsx
+index 5ac374ad544f447f0a58a8a531b4c8bb1b660daf..bf1bdf6bfd7581eef2f0b50af4d63008ee01590c 100644
+--- a/src/client/chips/BranchPopover.tsx
++++ b/src/client/chips/BranchPopover.tsx
+@@ -17,6 +17,8 @@ import css from './context.module.css'
+ /** Props of the branch picker popover. */
+ export interface BranchPopoverProps {
+   view: BranchesView
++  /** Remote pages can inspect repository state but cannot mutate it. */
++  readOnly: boolean
+   /** Workspace-level switch verb; resolves to a stable git error on rejection. */
+   onSwitch: (branch: string) => Promise<SwitchResult>
+   /** Fired after a successful switch (the owner refetches its status). */
+@@ -37,7 +39,7 @@ const SUCCESS_DISMISS_MS = 900
+  * The branch picker popover.
+  * @param props - see {@link BranchPopoverProps}.
+  */
+-export function BranchPopover({ view, onSwitch, onSwitched, onCreate, onGraph, onClose, t }: BranchPopoverProps) {
++export function BranchPopover({ view, readOnly, onSwitch, onSwitched, onCreate, onGraph, onClose, t }: BranchPopoverProps) {
+   const [query, setQuery] = useState('')
+   const [pending, setPending] = useState<string | null>(null)
+   const [error, setError] = useState<string | null>(null)
+@@ -55,7 +57,7 @@ export function BranchPopover({ view, onSwitch, onSwitched, onCreate, onGraph, o
+   }, [view.branches, query])
+ 
+   const switchTo = (branch: string): void => {
+-    if (pending !== null) return
++    if (readOnly || pending !== null) return
+     setPending(branch)
+     setError(null)
+     setSuccess(null)
+@@ -86,6 +88,7 @@ export function BranchPopover({ view, onSwitch, onSwitched, onCreate, onGraph, o
+         </div>
+         {view.dirtyFiles > 0
+           && <div className={css.dirty}>{t('branch.dirty', { count: view.dirtyFiles })}</div>}
++        {readOnly && <div className={css.empty}>{t('branch.remoteReadOnly')}</div>}
+         <div className={css.list}>
+           {filtered.length === 0
+             ? <div className={css.empty}>{t('branch.empty')}</div>
+@@ -97,7 +100,7 @@ export function BranchPopover({ view, onSwitch, onSwitched, onCreate, onGraph, o
+                 onClick={() => { switchTo(branch.name) }}
+                 role="option"
+                 aria-selected={branch.current}
+-                disabled={pending !== null}
++                disabled={readOnly || pending !== null}
+               >
+                 <IconBranchOutline16 size={14} />
+                 <span className={css.itemText}>
+@@ -110,10 +113,12 @@ export function BranchPopover({ view, onSwitch, onSwitched, onCreate, onGraph, o
+         {success !== null && <div className={cx(css.notice, css.noticeOk)}>{success}</div>}
+         {error !== null && <div className={css.notice}>{error}</div>}
+         <div className={css.footer}>
+-          <button type="button" className={css.footerItem} onClick={onCreate}>
+-            <IconBranchOutline16 size={14} />
+-            {t('branch.create')}
+-          </button>
++          {!readOnly && (
++            <button type="button" className={css.footerItem} onClick={onCreate}>
++              <IconBranchOutline16 size={14} />
++              {t('branch.create')}
++            </button>
++          )}
+           <button type="button" className={css.footerItem} onClick={onGraph}>
+             <IconBranchOutline16 size={14} />
+             {t('branch.graph')}
+diff --git a/src/client/index.ts b/src/client/index.ts
+index 55d5202f1e5815b4e4215c8ceb8bc2136472c9c8..7e0c917fee038ddd6691ea72385e691370dea10c 100644
+--- a/src/client/index.ts
++++ b/src/client/index.ts
+@@ -1,39 +1,26 @@
+ /**
+  * Git-graph surface plugin, browser half: the git branch selector chip,
+- * docked above the input card. Preferred seat is the input selector row's
+- * context hole (`conversation.input.selector.context`, a session-maybe
+- * list slot declared and rendered by newer shipped ui-conversation shells),
+- * right beside the official workspace selector; the published npm SDK
+- * (rc.6) dropped that hole, so the chip waits on its declaration for
+- * {@link CONTEXT_FALLBACK_MS} and then falls back to
+- * `conversation.input.dock` (the 0.1.9 seat). All git facts arrive
++ * docked above the input card through `conversation.input.dock`. All git facts arrive
+  * through the host /git routes (this package's own host half); the inject
+  * face carries the business verbs, the components stay pure props.
+  *
+- * The context hole is session-maybe: the chip stays mounted from cold start
+- * through the active phase and hides itself when its data source is absent
+- * (no session cwd, or not a git repository) — no workspace selector lives
+- * here, the official selector chip docked above the input card owns that
+- * surface. The dock fallback is session-scoped: the chip mounts once a
+- * session is active, so the blank hero phase has no seat there (the
+- * accepted rc.6 downgrade). Revision 0be6546 moved the chip back to the
+- * context hole without a fallback, so on rc.6 shells the inject wait never
+- * resolved and the chip disappeared. The published npm SDK (rc.6) dropped
+- * the hole's type, so it is spelled locally below.
++ * The dock is session-scoped, so the chip mounts once a session is active
++ * and hides itself when its data source is absent (no session cwd, or not a
++ * git repository). Registration stays inside the declaring slot's lifecycle;
++ * there is no delayed callback that can outlive an unloaded plugin generation.
+  * @module dsh-git-graph/client
+  */
+ 
+ import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
++import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
+ import type {} from '@deepseek-ai/dsh-client-locale/client'
+-// Type-only: pulls the ui-conversation SlotMap merge (the conversation
+-// slots); the selector-context hole is spelled locally below because the
+-// published npm SDK (rc.6) dropped it while the running shell still renders it.
++// Type-only: pulls the ui-conversation SlotMap merge for the input dock.
+ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+ import type {} from '@deepseek-ai/dsh-client-ui-slots'
+ import type {
+   BranchesView, GitError, GraphView, RepoStatus, SwitchResult,
+ } from '../core/types.ts'
+-import { GitApi, subscribeChanges } from './api.ts'
++import { GitApi } from './api.ts'
+ import { BranchChip } from './chips/BranchChip.tsx'
+ import { en, zh, type GitGraphKey } from './locales.ts'
+ 
+@@ -46,37 +33,42 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
+     'git-graph': GitGraphKey
+   }
+ 
+-  interface SlotMap {
+-    /**
+-     * The input selector context-chip hole: feature chips rendered right
+-     * after the workspace selector (the git branch selector's seat).
+-     * Session-maybe: entries stay mounted without a session and hide
+-     * themselves when their data source is absent.
+-     *
+-     * Declared and rendered by the running dsh web shell
+-     * (ui-conversation's InputSelectorRow); the published npm SDK (rc.6)
+-     * dropped this hole, so it is spelled locally to keep the chip's
+-     * registration type-checked without depending on the sibling SDK surface.
+-     */
+-    'conversation.input.selector.context': {
+-      kind: 'list'
+-      scope: 'session-maybe'
+-      owner: InputSelectorContextOwnerProps
++}
++
++declare module '@deepseek-ai/cordis' {
++  interface Context {
++    sharedEventSource: {
++      subscribe(options: {
++        url: string
++        key: string
++        eventName?: string
++        onMessage(data: string): void
++        onCoordinationError(error: unknown): void
++      }): () => void
+     }
+   }
+ }
+ 
+-/** Owner share of the input selector context-chip hole (empty by contract). */
+-export interface InputSelectorContextOwnerProps {}
++function subscribeChanges(ctx: ClientContext, path: string, onChange: () => void): () => void {
++  return ctx.sharedEventSource.subscribe({
++    url: `/git/events?path=${encodeURIComponent(path)}`,
++    key: `git:${path}`,
++    eventName: 'change',
++    onMessage: onChange,
++    onCoordinationError: error => { console.warn('[dsh-git-graph] shared event stream unavailable', error) },
++  })
++}
+ 
+ /** Dictionary namespace owned by this plugin. */
+ const NS = 'git-graph'
+ 
+-/** Required services: slots for the selector-context entry, sessions for the cwd lookup, locale for the copy. */
+-export const inject = ['slots', 'sessions', 'connection', 'locale']
++/** Required services: slots for the dock entry, sessions for the cwd lookup, locale for the copy. */
++export const inject = ['slots', 'sessions', 'connection', 'locale', 'sharedEventSource']
+ 
+ /** Injected business face of the branch chip: git verbs, keyed by the current session id. */
+ export interface GitGraphInjected {
++  /** Whether this browser may inspect Git state but must not mutate the repository. */
++  readOnly: boolean
+   /** The workspace repository snapshot; null when not a repository. */
+   repoStatus: (sessionId: SessionId | undefined) => Promise<RepoStatus | null>
+   /** Local branch list with the current branch marked. */
+@@ -95,35 +87,17 @@ export interface GitGraphInjected {
+ const NO_WORKSPACE: GitError = { code: 'workspace-unknown', message: 'session has no workspace' }
+ 
+ /**
+- * How long the chip waits for the selector-context declaration before
+- * falling back to the input dock. The window covers the shell's first
+- * render of the input selector row after the conversation service is up;
+- * shells that never declare the hole (rc.6) land on the dock after it.
+- */
+-export const CONTEXT_FALLBACK_MS = 2000
+-
+-/**
+- * Client plugin body: the branch chip entry with its git verbs, on the
+- * selector-context hole with an input-dock fallback.
++ * Client plugin body: the branch chip entry with its git verbs on the input dock.
+  * @param ctx - client root context.
+  */
+ export function apply(ctx: ClientContext): void {
+   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-git-graph: dictionaries')
+ 
++  const connection = ctx.get('connection') as ConnectionHandle
+   const git = new GitApi()
+ 
+-  // The context-fallback timer, armed once the conversation seam is up and
+-  // cleared when this fiber unloads (the slot inject waits die with the
+-  // fiber too, so no seat survives an unload).
+-  let fallbackTimer: ReturnType<typeof setTimeout> | undefined
+-  ctx.effect(() => () => {
+-    if (fallbackTimer !== undefined) clearTimeout(fallbackTimer)
+-  }, 'dsh-git-graph: context fallback timer')
+-
+   // Conditional mount: the conversation service being up is the
+-  // registration-safe signal (the GoalDock/QueueDock seam). The chip then
+-  // prefers the selector-context hole and falls back to the input dock when
+-  // that declaration never arrives.
++  // registration-safe signal for the input dock.
+   ctx.inject(['slots', 'conversation', 'sessions'], (scope: ClientContext) => {
+     const sessions = scope.sessions
+ 
+@@ -140,6 +114,7 @@ export function apply(ctx: ClientContext): void {
+         return { ok: true, path: cwd }
+       }
+       return {
++        readOnly: !connection.isLoopback,
+         repoStatus: async (sessionId) => {
+           const resolved = pathOf(sessionId)
+           if (!resolved.ok) return null
+@@ -173,36 +148,15 @@ export function apply(ctx: ClientContext): void {
+         subscribeChanges: (sessionId, onChange) => {
+           const resolved = pathOf(sessionId)
+           if (!resolved.ok) return () => {}
+-          return subscribeChanges(resolved.path, onChange)
++          return subscribeChanges(ctx, resolved.path, onChange)
+         },
+       }
+     }
+ 
+-    // The entry shape shared by both seats; each register call spells the
+-    // seat's literal name so its own declaration is checked.
+     const chipEntry = { id: 'git-graph', order: 100, locale: NS, inject: injected } as const
+-
+-    // Declaration-aware with a fallback. A bare register() would throw on
+-    // shells that dropped the hole (SDK SlotCore.register rejects undeclared
+-    // slots), so both seats route through inject like the pet / remote-web-ui
+-    // entries. The preferred context wait resolves the moment the shell
+-    // declares the hole; when it never does (rc.6), the fallback disposes
+-    // that wait and moves the chip to the dock. Exactly one seat mounts: a
+-    // context declaration landing after the fallback finds the wait gone.
+-    let mounted = false
+-    const disposeContextWait = scope.slots.inject('conversation.input.selector.context', () => {
+-      mounted = true
+-      return scope.slots.register(
+-        { name: 'conversation.input.selector.context', ...chipEntry },
+-        BranchChip)
+-    })
+-    fallbackTimer = setTimeout(() => {
+-      if (mounted) return
+-      disposeContextWait()
+-      scope.slots.inject('conversation.input.dock', () =>
+-        scope.slots.register(
+-          { name: 'conversation.input.dock', ...chipEntry },
+-          BranchChip))
+-    }, CONTEXT_FALLBACK_MS)
++    scope.slots.inject('conversation.input.dock', () =>
++      scope.slots.register(
++        { name: 'conversation.input.dock', ...chipEntry },
++        BranchChip))
+   })
+ }
+diff --git a/src/client/locales.ts b/src/client/locales.ts
+index 247a906b5a0daeebf8cf4e3c42c1b21c0103be82..1171964a5f2668a4fd9ea9a2880df8a0a10aa19f 100644
+--- a/src/client/locales.ts
++++ b/src/client/locales.ts
+@@ -6,6 +6,7 @@ export const zh = {
+   'branch.empty': '未找到匹配分支',
+   'branch.detached': '分离 HEAD',
+   'branch.dirty': '未提交的更改：{count} 个文件',
++  'branch.remoteReadOnly': '手机远程只读。切换或新建分支请回到电脑。',
+   'branch.create': '创建并检出新分支…',
+   'branch.graph': 'Git 图谱',
+   'branch.createDialog.title': '创建并检出新分支',
+@@ -50,6 +51,7 @@ export const en = {
+   'branch.empty': 'No matching branches',
+   'branch.detached': 'Detached HEAD',
+   'branch.dirty': 'Uncommitted changes: {count} files',
++  'branch.remoteReadOnly': 'Remote access is read-only. Switch or create branches on the computer.',
+   'branch.create': 'Create and switch to new branch…',
+   'branch.graph': 'Git Graph',
+   'branch.createDialog.title': 'Create and switch to new branch',
+diff --git a/src/host/routes.ts b/src/host/routes.ts
+index 5b6791195e56f7f53ad562c0cf5c6308c86437e5..a922d1b5b4c88dfeb758f90c974a80bf9edbce7c 100644
+--- a/src/host/routes.ts
++++ b/src/host/routes.ts
+@@ -12,6 +12,15 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
+ import type { GitError } from '../core/types.ts'
+ import type { GitService } from './git-service.ts'
+ 
++declare module '@deepseek-ai/cordis' {
++  interface Events {
++    /** Live paired-device authorization decision from remote-web-ui. @mode bail */
++    'remote-web-ui/authorize-http'(request: IncomingMessage): 'allow' | 'deny' | undefined
++    /** Paired-device authorization changed; active streams must recheck. @mode broadcast */
++    'remote-web-ui/authorization-changed'(): void
++  }
++}
++
+ /** Envelope every /git JSON response carries. */
+ export type GitEnvelope<T> =
+   | { ok: true; value: T }
+@@ -27,6 +36,8 @@ const BAD_REQUEST: GitError = { code: 'internal', message: 'malformed request' }
+ interface Subscriber {
+   path: string
+   last: string
++  paired: boolean
++  req: IncomingMessage
+   res: ServerResponse
+ }
+ 
+@@ -38,6 +49,58 @@ const HEARTBEAT_INTERVAL_MS = 15_000
+ /** Request body size cap; larger bodies are destroyed rather than drained. */
+ const BODY_CAP_BYTES = 1 << 20
+ 
++const REMOTE_PAIRED_PATHS = new Set([
++  '/git/status',
++  '/git/branches',
++  '/git/graph',
++])
++
++type RequestAccess = 'loopback' | 'paired'
++
++/** True only for a real loopback socket whose Host also names loopback. */
++function isLoopbackRequest(req: IncomingMessage, host: URL): boolean {
++  const address = req.socket.remoteAddress?.toLowerCase()
++  if (address === undefined) return false
++  const v4 = address.startsWith('::ffff:') ? address.slice('::ffff:'.length) : address
++  const octets = v4.split('.')
++  const loopbackSocket = address === '::1'
++    || octets.length === 4
++      && octets[0] === '127'
++      && octets.every(octet => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
++  const hostname = host.hostname
++  const hostOctets = hostname.split('.')
++  const loopbackHost = hostname === 'localhost' || hostname === '[::1]'
++    || hostOctets.length === 4
++      && hostOctets[0] === '127'
++      && hostOctets.every(octet => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
++  return loopbackSocket && loopbackHost
++}
++
++/** Authorize local operations, or the explicitly paired operation set. */
++function authorizeRequest(ctx: Context, req: IncomingMessage, pairedAccess: boolean): RequestAccess | undefined {
++  if (req.headers['sec-fetch-site'] === 'cross-site') return undefined
++  const rawHost = req.headers.host
++  if (typeof rawHost !== 'string') return undefined
++  let host: URL
++  try {
++    host = new URL(`http://${rawHost}`)
++  } catch {
++    return undefined
++  }
++  const origin = req.headers.origin
++  if (origin !== undefined) {
++    try {
++      if (new URL(origin).host !== host.host) return undefined
++    } catch {
++      return undefined
++    }
++  }
++  if (isLoopbackRequest(req, host)) return 'loopback'
++  return pairedAccess && ctx.bail(ctx, 'remote-web-ui/authorize-http', req) === 'allow'
++    ? 'paired'
++    : undefined
++}
++
+ /** Read a JSON request body into an unknown value; null when unparseable. */
+ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+   const chunks: Buffer[] = []
+@@ -88,11 +151,43 @@ export function registerGitRoutes(ctx: Context, service: GitService): () => void
+   let pollTimer: NodeJS.Timeout | undefined
+   let heartbeatTimer: NodeJS.Timeout | undefined
+ 
++  const stopIdleTimers = (): void => {
++    if (subscribers.size !== 0) return
++    if (pollTimer !== undefined) clearInterval(pollTimer)
++    if (heartbeatTimer !== undefined) clearInterval(heartbeatTimer)
++    pollTimer = undefined
++    heartbeatTimer = undefined
++  }
++
++  const closeSubscriber = (subscriber: Subscriber, endResponse: boolean): void => {
++    if (!subscribers.delete(subscriber)) return
++    if (endResponse) subscriber.res.end()
++    stopIdleTimers()
++  }
++
++  const revokeUnauthorizedSubscribers = (): void => {
++    for (const subscriber of subscribers) {
++      if (subscriber.paired && authorizeRequest(ctx, subscriber.req, true) !== 'paired') {
++        closeSubscriber(subscriber, true)
++      }
++    }
++  }
++
++  const revokeDeniedSubscribers = (): void => {
++    for (const subscriber of subscribers) {
++      if (subscriber.paired && ctx.bail(ctx, 'remote-web-ui/authorize-http', subscriber.req) === 'deny') {
++        closeSubscriber(subscriber, true)
++      }
++    }
++  }
++
+   const push = (subscriber: Subscriber, payload: unknown): void => {
++    if (!subscribers.has(subscriber)) return
+     subscriber.res.write(`event: change\ndata: ${JSON.stringify(payload)}\n\n`)
+   }
+ 
+   const poll = (): void => {
++    revokeUnauthorizedSubscribers()
+     for (const subscriber of subscribers) {
+       void service.status(subscriber.path).then((status) => {
+         const key = status === null ? 'no-repo' : `${status.root}|${status.branch}|${status.head}`
+@@ -111,17 +206,19 @@ export function registerGitRoutes(ctx: Context, service: GitService): () => void
+       res.end()
+       return
+     }
+-    // CSRF hardening: the /git mutations (switch/create-branch) act on the
+-    // real repository with no origin/referer check, so require a JSON
+-    // content-type — cross-site forms cannot set application/json without a
+-    // CORS preflight, which the same-origin client always sends.
++    const pathname = new URL(req.url ?? '/', 'http://x').pathname
++    if (authorizeRequest(ctx, req, REMOTE_PAIRED_PATHS.has(pathname)) === undefined) {
++      res.writeHead(403)
++      res.end('forbidden')
++      return
++    }
++    // Cross-site forms cannot set application/json without a CORS preflight.
+     const contentType = req.headers['content-type'] ?? ''
+     if (!contentType.toLowerCase().startsWith('application/json')) {
+       res.writeHead(415)
+       res.end()
+       return
+     }
+-    const pathname = new URL(req.url ?? '/', 'http://x').pathname
+     const payload = await readJsonBody(req)
+     const path = pathOf(payload)
+     if (path === null) {
+@@ -174,6 +271,12 @@ export function registerGitRoutes(ctx: Context, service: GitService): () => void
+   }
+ 
+   const sse = (req: IncomingMessage, res: ServerResponse): void => {
++    const access = authorizeRequest(ctx, req, true)
++    if (access === undefined) {
++      res.writeHead(403)
++      res.end()
++      return
++    }
+     const url = new URL(req.url ?? '/', 'http://x')
+     const path = url.searchParams.get('path')
+     if (path === null || path === '') {
+@@ -187,28 +290,24 @@ export function registerGitRoutes(ctx: Context, service: GitService): () => void
+       connection: 'keep-alive',
+     })
+     res.write('retry: 2000\n\n')
+-    const subscriber: Subscriber = { path, last: '', res }
++    const subscriber: Subscriber = { path, last: '', paired: access === 'paired', req, res }
+     subscribers.add(subscriber)
+     if (pollTimer === undefined) {
+       pollTimer = setInterval(poll, POLL_INTERVAL_MS)
+     }
+     if (heartbeatTimer === undefined) {
+       heartbeatTimer = setInterval(() => {
++        revokeUnauthorizedSubscribers()
+         for (const current of subscribers) current.res.write(': ping\n\n')
+       }, HEARTBEAT_INTERVAL_MS)
+     }
+     req.on('close', () => {
+-      subscribers.delete(subscriber)
+-      if (subscribers.size === 0) {
+-        if (pollTimer !== undefined) clearInterval(pollTimer)
+-        if (heartbeatTimer !== undefined) clearInterval(heartbeatTimer)
+-        pollTimer = undefined
+-        heartbeatTimer = undefined
+-      }
++      closeSubscriber(subscriber, false)
+     })
+   }
+ 
+   const disposers = [
++    ctx.on('remote-web-ui/authorization-changed', revokeDeniedSubscribers),
+     ctx.webServer.register({ kind: 'prefix', path: '/git', handler }),
+     ctx.webServer.register({ kind: 'exact', path: '/git/events', handler: sse }),
+   ]
+@@ -216,7 +315,7 @@ export function registerGitRoutes(ctx: Context, service: GitService): () => void
+     for (const dispose of disposers) dispose()
+     if (pollTimer !== undefined) clearInterval(pollTimer)
+     if (heartbeatTimer !== undefined) clearInterval(heartbeatTimer)
+-    for (const subscriber of subscribers) subscriber.res.end()
++    for (const subscriber of [...subscribers]) closeSubscriber(subscriber, true)
+     subscribers.clear()
+   }
+ }

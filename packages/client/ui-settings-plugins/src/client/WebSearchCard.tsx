@@ -24,7 +24,7 @@ export type WebSearchCardProps =
 export function WebSearchCard(props: WebSearchCardProps) {
   const { t } = props
   const state = props.useWebSearchCard(snapshot => snapshot)
-  const disabled = !state.writable
+  const disabled = !state.writable || state.saving
   return (
     <PluginCard
       t={t}
@@ -42,7 +42,7 @@ export function WebSearchCard(props: WebSearchCardProps) {
         // itself is read-only; they are separate stores with separate refusals.
         // Its own writability is what disables this control — a key sourced
         // from the process environment cannot be written from here.
-        disabled={!state.apiKeyWritable}
+        disabled={!state.apiKeyWritable || state.saving}
         text={state.apiKey.text}
         configured={state.apiKeyConfigured}
         stateLabel={state.apiKeyConfigured ? t('webSearchApiKeySet') : t('webSearchApiKeyUnset')}

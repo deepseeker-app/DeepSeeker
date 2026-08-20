@@ -8,6 +8,10 @@
 
 *.pdf binary
 
+# Patch files contain their own diff markers, so nested context indentation is
+# not source whitespace for the outer repository diff.
+*.patch -whitespace
+
 # Pairing records are generated from the three confirmed owner-blob pairs.
 # The worktree-local installer registers the fail-closed driver command.
 *.i18n.yaml merge=dsh-translation-pairing

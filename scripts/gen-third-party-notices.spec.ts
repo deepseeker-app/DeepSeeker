@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { describe, expect, it } from 'vitest'
 import {
   CLAUDE_AGENT_SDK_PACKAGE,
+  GSAP_RUNTIME_PACKAGES,
   claudeDistributionFromManifest,
   collectPythonDependencies,
   isOwnerAuthorizedRuntime,
@@ -328,6 +329,16 @@ describe('official Claude distribution authorization', () => {
         '@anthropic-ai/unrelated': '1.0.0',
       },
     })).toThrow('outside its authorized platform-payload identity')
+  })
+})
+
+describe('GSAP website runtime authorization', () => {
+  it('authorizes only the two reviewed package identities without relabeling their terms', () => {
+    expect(GSAP_RUNTIME_PACKAGES).toEqual(['@gsap/react', 'gsap'])
+    expect(GSAP_RUNTIME_PACKAGES.every(isOwnerAuthorizedRuntime)).toBe(true)
+    expect(isOwnerAuthorizedRuntime('@gsap/unrelated')).toBe(false)
+    expect(isOwnerAuthorizedRuntime('gsap-extra')).toBe(false)
+    expect(isPermissive('SEE LICENSE AT https://gsap.com/standard-license')).toBe(false)
   })
 })
 

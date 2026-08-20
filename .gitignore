@@ -37,6 +37,7 @@ apps/desktop/runtime-host/
 apps/desktop/dist/
 .artifacts/
 .playwright-mcp/
+.patch-work/
 .orig
 .worktrees/
 worktrees/

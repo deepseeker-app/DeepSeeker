@@ -22,6 +22,7 @@
 - 'button "Failed Bash Error: tool call aborted before dispatch"':
   - img
   - text: "Failed Bash Error: tool call aborted before dispatch"
+- button "插入图片引用，交给 describe_image 工具分析"
 - textbox "Message the agent"
 - button "Commands":
   - img
@@ -30,4 +31,4 @@
   - text: DeepSeek-V4-Flash
   - img
 - button "Send message" [disabled]
-- text: 1 turns · 1 steps LLM {{duration}} · Tool call {{duration}} TTFT avg {{duration}} · {{throughput}} tok/s Cache hit 0% Input 10 tok · Output 10 tok
+- text: 1 turns · 1 steps LLM {{duration}} · Tool call {{duration}} TTFT avg {{duration}} · {{throughput}} tok/s Cache hit 0% Input 10 tok · Output 10 tok TPS {{throughput}} tok/s

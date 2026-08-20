@@ -36,8 +36,20 @@ External packages that a workspace package resolves at runtime. The tier covers 
 | [`@anthropic-ai/sdk`](https://github.com/anthropics/anthropic-sdk-typescript) | MIT |
 | [`@babel/code-frame`](https://github.com/babel/babel) | MIT |
 | [`@earendil-works/pi-ai`](https://github.com/earendil-works/pi) | MIT |
+| [`@gsap/react`](https://github.com/greensock/react) | SEE LICENSE AT https://gsap.com/standard-license |
 | [`@joplin/turndown-plugin-gfm`](https://github.com/laurent22/joplin-turndown-plugin-gfm) | MIT |
 | [`@jridgewell/gen-mapping`](https://github.com/jridgewell/sourcemaps) | MIT |
+| [`@linxin666/dsh-client-ui-aionui-panel`](https://github.com/zhu1090093659/dsh-web-ui) | Apache-2.0 |
+| [`@linxin666/dsh-client-ui-git-graph`](https://github.com/zhu1090093659/dsh-web-ui) | Apache-2.0 |
+| [`@linxin666/dsh-client-ui-skin-center`](https://github.com/zhu1090093659/dsh-web-ui) | Apache-2.0 |
+| [`@linxin666/dsh-client-ui-task-board`](https://github.com/zhu1090093659/dsh-web-ui) | Apache-2.0 |
+| [`@linxin666/dsh-client-ui-web-ui-settings`](https://github.com/zhu1090093659/dsh-web-ui) | Apache-2.0 |
+| [`@linxin666/dsh-live-stats`](https://github.com/zhu1090093659/dsh-web-ui) | Apache-2.0 |
+| [`@linxin666/dsh-pet`](https://github.com/zhu1090093659/dsh-web-ui) | Apache-2.0 |
+| [`@linxin666/dsh-remote-web-ui`](https://github.com/zhu1090093659/dsh-web-ui) | Apache-2.0 |
+| [`@linxin666/dsh-ssh`](https://github.com/zhu1090093659/dsh-web-ui) | Apache-2.0 |
+| [`@linxin666/dsh-tool-describe-image`](https://github.com/zhu1090093659/dsh-web-ui) | Apache-2.0 |
+| [`@linxin666/dsh-web-ui-all`](https://github.com/zhu1090093659/dsh-web-ui) | Apache-2.0 AND BSD-3-Clause |
 | [`@modelcontextprotocol/sdk`](https://github.com/modelcontextprotocol/typescript-sdk) | MIT |
 | [`@opentelemetry/api`](https://github.com/open-telemetry/opentelemetry-js) | Apache-2.0 |
 | [`@opentelemetry/api-logs`](https://github.com/open-telemetry/opentelemetry-js) | Apache-2.0 |
@@ -51,6 +63,8 @@ External packages that a workspace package resolves at runtime. The tier covers 
 | [`@tanstack/react-virtual`](https://github.com/TanStack/virtual) | MIT |
 | [`@types/mdast`](https://github.com/DefinitelyTyped/DefinitelyTyped) | MIT |
 | [`@vscode/ripgrep`](https://github.com/microsoft/vscode-ripgrep) | MIT |
+| [`@xterm/addon-fit`](https://github.com/xtermjs/xterm.js/tree/master/addons/addon-fit) | MIT |
+| [`@xterm/xterm`](https://github.com/xtermjs/xterm.js) | MIT |
 | [`anser`](https://github.com/IonicaBizau/anser) | MIT |
 | [`chokidar`](https://github.com/paulmillr/chokidar) | MIT |
 | [`clsx`](https://github.com/lukeed/clsx) | MIT |
@@ -59,6 +73,7 @@ External packages that a workspace package resolves at runtime. The tier covers 
 | [`e2b`](https://github.com/e2b-dev/e2b) | MIT |
 | [`eventsource-parser`](https://github.com/rexxars/eventsource-parser) | MIT |
 | [`fflate`](https://github.com/101arrowz/fflate) | MIT |
+| [`gsap`](https://github.com/greensock/GSAP) | Standard 'no charge' license: https://gsap.com/standard-license. |
 | [`immer`](https://github.com/immerjs/immer) | MIT |
 | [`js-yaml`](https://github.com/nodeca/js-yaml) | MIT |
 | [`katex`](https://github.com/KaTeX/KaTeX) | MIT |
@@ -78,6 +93,7 @@ External packages that a workspace package resolves at runtime. The tier covers 
 | [`node-addon-require-builtin`](https://www.npmjs.com/package/node-addon-require-builtin) | MIT |
 | [`node-pty`](https://github.com/microsoft/node-pty) | MIT |
 | [`picomatch`](https://github.com/micromatch/picomatch) | MIT |
+| [`qrcode.react`](https://github.com/zpao/qrcode.react) | ISC |
 | [`react`](https://github.com/facebook/react) | MIT |
 | [`react-dom`](https://github.com/facebook/react) | MIT |
 | [`sharp`](https://github.com/lovell/sharp) | Apache-2.0 |
@@ -94,6 +110,16 @@ External packages that a workspace package resolves at runtime. The tier covers 
 
 pnpm applies local patches to the following packages at install time, so shipped artifacts carry modified copies; each patch file is the complete record of the modification:
 
+- `@linxin666/dsh-client-ui-aionui-panel@0.1.12` — [`patches/@linxin666__dsh-client-ui-aionui-panel@0.1.12.patch`](patches/@linxin666__dsh-client-ui-aionui-panel@0.1.12.patch)
+- `@linxin666/dsh-client-ui-git-graph@0.1.12` — [`patches/@linxin666__dsh-client-ui-git-graph@0.1.12.patch`](patches/@linxin666__dsh-client-ui-git-graph@0.1.12.patch)
+- `@linxin666/dsh-client-ui-skin-center@0.1.12` — [`patches/@linxin666__dsh-client-ui-skin-center@0.1.12.patch`](patches/@linxin666__dsh-client-ui-skin-center@0.1.12.patch)
+- `@linxin666/dsh-client-ui-task-board@0.1.12` — [`patches/@linxin666__dsh-client-ui-task-board@0.1.12.patch`](patches/@linxin666__dsh-client-ui-task-board@0.1.12.patch)
+- `@linxin666/dsh-client-ui-web-ui-settings@0.1.12` — [`patches/@linxin666__dsh-client-ui-web-ui-settings@0.1.12.patch`](patches/@linxin666__dsh-client-ui-web-ui-settings@0.1.12.patch)
+- `@linxin666/dsh-live-stats@0.1.12` — [`patches/@linxin666__dsh-live-stats@0.1.12.patch`](patches/@linxin666__dsh-live-stats@0.1.12.patch)
+- `@linxin666/dsh-pet@0.1.12` — [`patches/@linxin666__dsh-pet@0.1.12.patch`](patches/@linxin666__dsh-pet@0.1.12.patch)
+- `@linxin666/dsh-remote-web-ui@0.1.12` — [`patches/@linxin666__dsh-remote-web-ui@0.1.12.patch`](patches/@linxin666__dsh-remote-web-ui@0.1.12.patch)
+- `@linxin666/dsh-ssh@0.1.12` — [`patches/@linxin666__dsh-ssh@0.1.12.patch`](patches/@linxin666__dsh-ssh@0.1.12.patch)
+- `@linxin666/dsh-tool-describe-image@0.1.12` — [`patches/@linxin666__dsh-tool-describe-image@0.1.12.patch`](patches/@linxin666__dsh-tool-describe-image@0.1.12.patch)
 - `app-builder-lib@26.15.3` — [`patches/app-builder-lib@26.15.3.patch`](patches/app-builder-lib@26.15.3.patch)
 - `node-pty@1.1.0` — [`patches/node-pty@1.1.0.patch`](patches/node-pty@1.1.0.patch)
 
@@ -115,6 +141,11 @@ The installed SDK 0.3.220 declares the following optional platform packages. Eac
 | [`@anthropic-ai/claude-agent-sdk-win32-x64`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk-win32-x64) | 0.3.220 | SEE LICENSE IN LICENSE.md |
 
 
+## GSAP website animation runtime
+
+The project owner authorizes the website to bundle `@gsap/react` and `gsap` under Webflow's [Standard "No Charge" GSAP License](https://gsap.com/community/standard-license/). The reviewed use is limited to entrance, scroll, and interaction motion on the DeepSeeker website. DeepSeeker does not provide a visual animation builder. This identity-scoped authorization does not classify the GSAP terms as permissive and covers no other package.
+
+
 ## Development-only npm dependencies
 
 External packages **directly declared** only by repository tooling, test infrastructure, the documentation site, the demo leaves, or the native launcher's build workspace. No shipped surface names them itself. A package here may still be pulled in transitively by a runtime dependency — `pnpm-lock.yaml` is the authority on the full closure — so this tier records who declares a package, not what a build ultimately bundles.
@@ -122,6 +153,7 @@ External packages **directly declared** only by repository tooling, test infrast
 | Package | License |
 | --- | --- |
 | [`@braintree/sanitize-url`](https://github.com/braintree/sanitize-url) | MIT |
+| [`@electron/asar`](https://github.com/electron/asar) | MIT |
 | [`@modelcontextprotocol/server-everything`](https://github.com/modelcontextprotocol/servers) | MIT / Apache-2.0 |
 | [`@modelcontextprotocol/server-filesystem`](https://github.com/modelcontextprotocol/servers) | MIT / Apache-2.0 |
 | [`@openai/codex`](https://github.com/openai/codex) | Apache-2.0 |
@@ -136,6 +168,7 @@ External packages **directly declared** only by repository tooling, test infrast
 | [`@types/react`](https://github.com/DefinitelyTyped/DefinitelyTyped) | MIT |
 | [`@types/react-dom`](https://github.com/DefinitelyTyped/DefinitelyTyped) | MIT |
 | [`@types/spdx-expression-parse`](https://github.com/DefinitelyTyped/DefinitelyTyped) | MIT |
+| [`@types/ssh2`](https://github.com/DefinitelyTyped/DefinitelyTyped) | MIT |
 | [`@types/turndown`](https://github.com/DefinitelyTyped/DefinitelyTyped) | MIT |
 | [`@types/ws`](https://github.com/DefinitelyTyped/DefinitelyTyped) | MIT |
 | [`@vitejs/plugin-react`](https://github.com/vitejs/vite-plugin-react) | MIT |

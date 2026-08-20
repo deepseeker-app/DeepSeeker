@@ -9,15 +9,18 @@
     "musl-gcc",
     "python3",
     "sandbox-exec",
+    "security",
     "tar",
     "taskkill",
     "where.exe"
   ],
   "ignoreWorkspaces": [
+    "apps/desktop/runtime",
     "vendor/*",
     "python/sdk-runtime"
   ],
   "ignoreDependencies": [
+    "@types/ssh2",
     "@yarnpkg/cli-dist",
     "lightningcss"
   ],
@@ -737,7 +740,21 @@
         "tests/**/*.ts"
       ],
       "ignoreDependencies": [
-        "@deepseek-ai/.+"
+        "@deepseek-ai/.+",
+        "@linxin666/dsh-ssh",
+        "@linxin666/dsh-tool-describe-image"
+      ]
+    },
+    "apps/desktop": {
+      "entry": [
+        "scripts/verify-packaged-runtime.ts",
+        "src/main.ts",
+        "src/terminal-preload.ts"
+      ]
+    },
+    "apps/site": {
+      "entry": [
+        "public/skins/*.js"
       ]
     },
     "packages/client/modules": {
@@ -780,7 +797,11 @@
     },
     "packages/bundle/web-app": {
       "ignoreDependencies": [
-        "@deepseek-ai/.+"
+        "@deepseek-ai/.+",
+        "@linxin666/dsh-client-ui-skin-center",
+        "@linxin666/dsh-client-ui-web-ui-settings",
+        "@linxin666/dsh-pet",
+        "@linxin666/dsh-web-ui-all"
       ]
     }
   }

@@ -24,7 +24,7 @@
 
 import { createRequire } from 'node:module'
 import {
-  existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync,
+  existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, symlinkSync, unlinkSync, writeFileSync,
 } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import type { EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
@@ -242,8 +242,12 @@ export function healProfilesModuleFallback(installAnchor: string, home: string =
       // A declared-but-uninstalled dependency cannot be a loader-visible
       // plugin; skip it rather than fail the whole boot.
       if (dir === undefined) continue
-      links.set(dep, dir)
-      const manifestPath = join(dir, 'package.json')
+      // pnpm exposes dependencies through symlinks into its virtual store.
+      // Walk the next edge from that real package location; resolving from the
+      // visible symlink path misses the package's isolated node_modules.
+      const realDir = realpathSync(dir)
+      links.set(dep, realDir)
+      const manifestPath = join(realDir, 'package.json')
       queue.push({ anchor: manifestPath, manifest: JSON.parse(readFileSync(manifestPath, 'utf8')) as ProfileManifest })
     }
   }

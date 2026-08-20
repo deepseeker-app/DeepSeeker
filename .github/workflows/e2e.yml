@@ -25,19 +25,16 @@ name: E2E (real DeepSeek API)
 # The fork/secret model and its public-repo implications are recorded in
 # .agents/notes/implemented/testing/2026-06-19-real-api-e2e-ci.md.
 #
-# Note: scheduled triggers are auto-disabled after 60 days of repo inactivity;
-# push/pull_request/workflow_dispatch act as backstops.
 on:
   workflow_dispatch:
   push:
-    branches: [main, master]
+    branches: [master]
+  # DeepSeeker's public main branch has no upstream real-API secret. Keep this
+  # upstream workflow on master; DeepSeeker CI owns keyless main validation.
   pull_request:
-  schedule:
-    # 00:17 UTC nightly = 08:17 Asia/Shanghai — off the top-of-hour cron stampede.
-    - cron: '17 0 * * *'
+    branches: [master]
 
-# Cancel a superseded PR run (it is on a stale commit); never cancel a
-# push/schedule run — it is already producing the post-merge/nightly signal.
+# Cancel a superseded PR run (it is on a stale commit); never cancel a push run.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

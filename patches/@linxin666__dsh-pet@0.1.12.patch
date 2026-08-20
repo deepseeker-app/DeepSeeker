@@ -1,0 +1,795 @@
+diff --git a/lib/client.js b/lib/client.js
+index afc9e34e6434d716125b1bdecd5694efa5cbc08e..3044047b85167a4523f9aee1105abe43e2c46f69 100644
+--- a/lib/client.js
++++ b/lib/client.js
+@@ -344,10 +344,16 @@ window.__ModuleLoader__.load({
+ 		const PET_SPRITESHEET_URL = "/pet/whale/spritesheet.webp";
+ 		/** Browser URL of the whale-girl manifest (authoritative per-row frame counts). */
+ 		const PET_MANIFEST_URL = "/pet/whale/pet.json";
++		/** Keep the pet above normal app chrome while leaving modal overlays unobstructed. */
++		const PET_LAYER_Z_INDEX = 900;
+ 		/** Clamp a drag offset inside the viewport with a margin. */
+ 		function clampOffset(value, max) {
+ 			return Math.max(0, Math.min(max, value));
+ 		}
++		/** Keep the fixed navigation rail available when a saved position is clamped. */
++		function leftRailClearance() {
++			return document.documentElement.dataset.dshDesktopPlatform === "darwin" ? 90 : 56;
++		}
+ 		/**
+ 		* The floating pet. The spritesheet frame advances on requestAnimationFrame
+ 		* with per-frame durations from TRACKS; the atlas image is loaded once and
+@@ -469,8 +475,9 @@ window.__ModuleLoader__.load({
+ 				const dx = e.clientX - drag.startX;
+ 				const dy = e.clientY - drag.startY;
+ 				if (Math.abs(dx) > 4 || Math.abs(dy) > 4) draggedRef.current = true;
+-				const right = clampOffset(drag.right - dx, window.innerWidth - 40);
+-				const bottom = clampOffset(drag.bottom - dy, window.innerHeight - 40);
++				const petWidth = Math.round(192 * display.size / 208);
++				const right = clampOffset(drag.right - dx, Math.max(0, window.innerWidth - petWidth - leftRailClearance()));
++				const bottom = clampOffset(drag.bottom - dy, Math.max(0, window.innerHeight - display.size));
+ 				setDragPos({
+ 					right,
+ 					bottom
+@@ -481,19 +488,23 @@ window.__ModuleLoader__.load({
+ 				dragRef.current = null;
+ 				if (dragPos !== null) props.onDragEnd(dragPos.right, dragPos.bottom);
+ 			};
+-			const pos = dragPos ?? {
++			const rawPos = dragPos ?? {
+ 				right: display.right,
+ 				bottom: display.bottom
+ 			};
+ 			const spriteWidth = Math.round(192 * spriteScale);
+ 			const spriteHeight = Math.round(208 * spriteScale);
++			const pos = {
++				right: clampOffset(rawPos.right, Math.max(0, window.innerWidth - spriteWidth - leftRailClearance())),
++				bottom: clampOffset(rawPos.bottom, Math.max(0, window.innerHeight - spriteHeight))
++			};
+ 			return (0, react_dom.createPortal)(/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+ 				ref: floatRef,
+ 				className: pet_module_css_default.float,
+ 				style: {
+ 					right: pos.right,
+ 					bottom: pos.bottom,
+-					zIndex: 2147483e3
++					zIndex: PET_LAYER_Z_INDEX
+ 				},
+ 				onPointerEnter: () => {
+ 					clearHideTimer();
+@@ -629,6 +640,10 @@ window.__ModuleLoader__.load({
+ 			right: 24,
+ 			bottom: 20
+ 		};
++		/** Keep the fixed navigation rail available when the summon control is clamped. */
++		function summonLeftRailClearance() {
++			return document.documentElement.dataset.dshDesktopPlatform === "darwin" ? 90 : 56;
++		}
+ 		/**
+ 		* Dock entry: while the pet is visible, mount the floating WhalePet (it
+ 		* portals itself onto document.body); while hidden, render the summon
+@@ -662,14 +677,16 @@ window.__ModuleLoader__.load({
+ 				})
+ 			});
+ 			const display = snapshot?.display ?? DEFAULT_DISPLAY;
++			const right = Math.max(0, Math.min(display.right, window.innerWidth - 40 - summonLeftRailClearance()));
++			const bottom = Math.max(0, Math.min(display.bottom, window.innerHeight - 40));
+ 			return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+ 				type: "button",
+ 				className: pet_module_css_default.summon,
+ 				style: {
+ 					position: "fixed",
+-					right: display.right,
+-					bottom: display.bottom,
+-					zIndex: 2147483e3
++					right,
++					bottom,
++					zIndex: PET_LAYER_Z_INDEX
+ 				},
+ 				onClick: props.summon,
+ 				"data-testid": "pet-summon",
+@@ -998,13 +1015,14 @@ window.__ModuleLoader__.load({
+ 			specs;
+ 			staged = /* @__PURE__ */ new Map();
+ 			listeners = /* @__PURE__ */ new Set();
++			disposeScope;
+ 			saving = false;
+ 			failed = false;
+ 			/** @param scope - the bound settings scope for this card's namespace. */
+ 			constructor(scope, specs) {
+ 				this.scope = scope;
+ 				this.specs = new Map(specs.map((spec) => [spec.field, spec]));
+-				scope.subscribe(() => {
++				this.disposeScope = scope.subscribe(() => {
+ 					this.publish();
+ 				});
+ 			}
+@@ -1016,6 +1034,11 @@ window.__ModuleLoader__.load({
+ 				});
+ 				return store;
+ 			}
++			/** Release the settings subscription and card projections on plugin teardown. */
++			dispose() {
++				this.disposeScope();
++				this.listeners.clear();
++			}
+ 			/** Read the card-level state: what the Host serves, and what a save would do. */
+ 			shell() {
+ 				const snapshot = this.scope.getSnapshot();
+@@ -1202,6 +1225,10 @@ window.__ModuleLoader__.load({
+ 					...this.form.actions()
+ 				};
+ 			}
++			/** Release the form's page-lifetime settings subscription. */
++			dispose() {
++				this.form.dispose();
++			}
+ 		};
+ 		/**
+ 		* Render the pet settings card.
+@@ -1429,10 +1456,11 @@ window.__ModuleLoader__.load({
+ 		//#endregion
+ 		//#region src/client/index.ts
+ 		/** Same-origin JSON fetch helper (GET without body, POST with JSON body). */
+-		async function petFetch(path, body) {
+-			const response = await fetch(path, body === void 0 ? {} : {
++		async function petFetch(path, body, signal) {
++			const response = await fetch(path, body === void 0 ? { signal } : {
+ 				method: "POST",
+ 				headers: { "content-type": "application/json" },
++				signal,
+ 				body: JSON.stringify(body)
+ 			});
+ 			if (!response.ok) throw new Error(`pet ${path} failed: ${response.status}`);
+@@ -1440,7 +1468,7 @@ window.__ModuleLoader__.load({
+ 		}
+ 		/** The live host API instance (always defined; failures surface per call). */
+ 		const petApi = {
+-			state: () => petFetch("/api/pet/state"),
++			state: (signal) => petFetch("/api/pet/state", void 0, signal),
+ 			interact: (kind) => petFetch("/api/pet/interact", { kind }),
+ 			setVisible: (visible) => petFetch("/api/pet/set-visible", { visible }),
+ 			setConfig: (patch) => petFetch("/api/pet/set-config", patch),
+@@ -1448,6 +1476,10 @@ window.__ModuleLoader__.load({
+ 		};
+ 		/** Poll interval for the host snapshot. */
+ 		const POLL_MS = 800;
++		/** A wedged poll is released before it can occupy a browser connection indefinitely. */
++		const POLL_REQUEST_TIMEOUT_MS = 5e3;
++		/** Failed polls back off so an unavailable host cannot create a request storm. */
++		const POLL_MAX_BACKOFF_MS = 1e4;
+ 		/** Settings namespace the pet settings card edits (the Host plugin registers it). */
+ 		const PET_SETTINGS_NS = "pet";
+ 		/** Required services. */
+@@ -1469,7 +1501,9 @@ window.__ModuleLoader__.load({
+ 				zh,
+ 				en
+ 			}), "pet: dictionaries");
+-			const settingsScope = (ctx.get("webUiSettings") ?? ctx.settingsScope).bind({ namespace: PET_SETTINGS_NS });
++			if (!ctx.get("connection").isLoopback) return;
++			const binder = ctx.get("webUiSettings") ?? ctx.settingsScope;
++			const settingsScope = binder.bind({ namespace: PET_SETTINGS_NS });
+ 			const enabled = () => {
+ 				const snapshot = settingsScope.getSnapshot();
+ 				return snapshot.status === "ready" ? snapshot.value?.enabled ?? true : snapshot.status === "unavailable";
+@@ -1489,37 +1523,68 @@ window.__ModuleLoader__.load({
+ 					const setSnapshot = petStore.actions.setSnapshot;
+ 					const setState = petStore.actions.setState;
+ 					const setFeedback = petStore.actions.setFeedback;
++					let pollTimer;
++					let pollController;
++					let pollInFlight;
++					let pollFailures = 0;
++					let pollDisposed = false;
++					const stopPollTimer = () => {
++						if (pollTimer === void 0) return;
++						window.clearTimeout(pollTimer);
++						pollTimer = void 0;
++					};
++					const schedulePoll = () => {
++						if (pollDisposed || pollTimer !== void 0 || pollInFlight !== void 0) return;
++						if (document.visibilityState !== "visible") return;
++						const delay = Math.min(POLL_MS * 2 ** pollFailures, POLL_MAX_BACKOFF_MS);
++						pollTimer = window.setTimeout(() => {
++							pollTimer = void 0;
++							pollNow();
++						}, delay);
++					};
+ 					const pollNow = () => {
+-						petApi.state().then((snapshot) => {
++						if (pollDisposed || pollInFlight !== void 0) return;
++						if (document.visibilityState !== "visible") return;
++						stopPollTimer();
++						const controller = new AbortController();
++						pollController = controller;
++						let timedOut = false;
++						const requestTimeout = window.setTimeout(() => {
++							timedOut = true;
++							controller.abort();
++						}, POLL_REQUEST_TIMEOUT_MS);
++						const request = petApi.state(controller.signal).then((snapshot) => {
++							if (pollDisposed || controller.signal.aborted) return;
++							pollFailures = 0;
+ 							setSnapshot(snapshot);
+ 						}, () => {
++							if (pollDisposed || controller.signal.aborted && !timedOut) return;
++							pollFailures += 1;
+ 							setState("error", "pet.state transport error");
++						}).finally(() => {
++							window.clearTimeout(requestTimeout);
++							if (pollController === controller) pollController = void 0;
++							if (pollInFlight === request) pollInFlight = void 0;
++							schedulePoll();
+ 						});
++						pollInFlight = request;
++					};
++					const onVisibility = () => {
++						if (document.visibilityState === "visible") pollNow();
++						else {
++							stopPollTimer();
++							pollController?.abort();
++						}
++					};
++					document.addEventListener("visibilitychange", onVisibility);
++					pollNow();
++					const disposePoll = () => {
++						if (pollDisposed) return;
++						pollDisposed = true;
++						stopPollTimer();
++						pollController?.abort();
++						document.removeEventListener("visibilitychange", onVisibility);
+ 					};
+-					const disposePoll = ctx.effect(() => {
+-						let timer;
+-						const stop = () => {
+-							if (timer !== void 0) {
+-								window.clearInterval(timer);
+-								timer = void 0;
+-							}
+-						};
+-						const start = () => {
+-							if (timer === void 0 && document.visibilityState === "visible") timer = window.setInterval(pollNow, POLL_MS);
+-						};
+-						const onVisibility = () => {
+-							if (document.visibilityState === "visible") {
+-								pollNow();
+-								start();
+-							} else stop();
+-						};
+-						start();
+-						document.addEventListener("visibilitychange", onVisibility);
+-						return () => {
+-							stop();
+-							document.removeEventListener("visibilitychange", onVisibility);
+-						};
+-					}, "pet: poll");
+ 					const injected = () => ({
+ 						store: petStore,
+ 						ensure: pollNow,
+@@ -1587,7 +1652,13 @@ window.__ModuleLoader__.load({
+ 					disposeUi = void 0;
+ 				}
+ 			};
+-			settingsScope.subscribe(syncUi);
++			const disposeSettings = settingsScope.subscribe(syncUi);
++			ctx.effect(() => () => {
++				disposeSettings();
++				petSettings.dispose();
++				disposeUi?.();
++				disposeUi = void 0;
++			}, "pet: client lifecycle");
+ 			syncUi();
+ 		}
+ 		//#endregion
+diff --git a/lib/index.js b/lib/index.js
+index bfab5a04c97c82d4eea97ebd0dd43b23f0a015d9..5c5fb504c7f72390bb466c6693f0d88775270c20 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -479,6 +479,38 @@ function requireMethod(req, res, method) {
+ 	});
+ 	return false;
+ }
++/** Require a real loopback socket, loopback Host, and same-origin markers. */
++function requireLoopback(req, res) {
++	const address = req.socket.remoteAddress?.toLowerCase();
++	const octets = (address?.startsWith("::ffff:") === true ? address.slice(7) : address)?.split(".") ?? [];
++	const loopbackSocket = address === "::1" || octets.length === 4 && octets[0] === "127" && octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255);
++	const rawHost = req.headers.host;
++	let host;
++	try {
++		if (typeof rawHost !== "string") throw new Error("missing-host");
++		host = new URL(`http://${rawHost}`);
++	} catch {
++		json(res, 403, {
++			ok: false,
++			error: "loopback-request-required"
++		});
++		return false;
++	}
++	const hostOctets = host.hostname.split(".");
++	const loopbackHost = host.hostname === "localhost" || host.hostname === "[::1]" || hostOctets.length === 4 && hostOctets[0] === "127" && hostOctets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255);
++	let sameOrigin = req.headers["sec-fetch-site"] !== "cross-site";
++	if (sameOrigin && req.headers.origin !== void 0) try {
++		sameOrigin = new URL(req.headers.origin).host === host.host;
++	} catch {
++		sameOrigin = false;
++	}
++	if (loopbackSocket && loopbackHost && sameOrigin) return true;
++	json(res, 403, {
++		ok: false,
++		error: "loopback-request-required"
++	});
++	return false;
++}
+ /** Read a JSON request body (bounded). */
+ function readJsonBody(req) {
+ 	return new Promise((resolve, reject) => {
+@@ -514,6 +546,7 @@ function getRoute(path, run) {
+ 		path,
+ 		handler: (req, res) => {
+ 			if (!requireMethod(req, res, "GET")) return;
++			if (!requireLoopback(req, res)) return;
+ 			run().then((value) => json(res, 200, value), (error) => {
+ 				json(res, 500, {
+ 					ok: false,
+@@ -530,6 +563,7 @@ function postRoute(path, run) {
+ 		path,
+ 		handler: (req, res) => {
+ 			if (!requireMethod(req, res, "POST")) return Promise.resolve();
++			if (!requireLoopback(req, res)) return Promise.resolve();
+ 			return readJsonBody(req).then((body) => {
+ 				return run(typeof body === "object" && body !== null ? body : {}).then((value) => json(res, 200, value), (error) => {
+ 					json(res, 400, {
+@@ -582,6 +616,7 @@ function makePetRoutes(deps) {
+ 				res.end();
+ 				return;
+ 			}
++			if (!requireLoopback(req, res)) return;
+ 			return readFile(join(packageRoot, "assets", "whale", file.name)).then((body) => {
+ 				res.writeHead(200, {
+ 					"content-type": file.mime,
+diff --git a/lib/types/client/index.js b/lib/types/client/index.js
+index 07ed2c8667b51daed847eae96b80a02514f29d2f..adc867e982fbad2536a8206bd42c0affedab5ab6 100644
+--- a/lib/types/client/index.js
++++ b/lib/types/client/index.js
+@@ -51,6 +51,8 @@ export const inject = ['slots', 'locale', 'connection', 'settingsScope', 'remote
+  */
+ export function apply(ctx) {
+     ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'pet: dictionaries');
++    if (!ctx.get('connection').isLoopback)
++        return;
+     const binder = ctx.get('webUiSettings') ?? ctx.settingsScope;
+     const settingsScope = binder.bind({ namespace: PET_SETTINGS_NS });
+     const enabled = () => {
+diff --git a/src/client/PetDockEntry.tsx b/src/client/PetDockEntry.tsx
+index d27ac7331bcc5e5f06ce5087d9d2263f6aa5a0d6..b191c346b17b5b43c81477194e4d79d6a5b3661f 100644
+--- a/src/client/PetDockEntry.tsx
++++ b/src/client/PetDockEntry.tsx
+@@ -13,7 +13,7 @@ import { useEffect, useSyncExternalStore, type ReactElement } from 'react'
+ import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
+ import type { PetDisplayConfig } from '../persist.ts'
+ import type { PetStoreInstance } from './pet-store.ts'
+-import { WhalePet } from './WhalePet.tsx'
++import { PET_LAYER_Z_INDEX, WhalePet } from './WhalePet.tsx'
+ import { NS } from './locales.ts'
+ import styles from './pet.module.css'
+ 
+@@ -46,6 +46,11 @@ export type PetDockEntryProps =
+ 
+ const DEFAULT_DISPLAY: PetDisplayConfig = { visible: true, size: 160, right: 24, bottom: 20 }
+ 
++/** Keep the fixed navigation rail available when the summon control is clamped. */
++function summonLeftRailClearance(): number {
++  return document.documentElement.dataset.dshDesktopPlatform === 'darwin' ? 90 : 56
++}
++
+ /**
+  * Dock entry: while the pet is visible, mount the floating WhalePet (it
+  * portals itself onto document.body); while hidden, render the summon
+@@ -83,15 +88,20 @@ export function PetDockEntry(props: PetDockEntryProps): ReactElement {
+     )
+   }
+   const display = snapshot?.display ?? DEFAULT_DISPLAY
++  const right = Math.max(
++    0,
++    Math.min(display.right, window.innerWidth - 40 - summonLeftRailClearance()),
++  )
++  const bottom = Math.max(0, Math.min(display.bottom, window.innerHeight - 40))
+   return (
+     <button
+       type="button"
+       className={styles.summon}
+       style={{
+         position: 'fixed',
+-        right: display.right,
+-        bottom: display.bottom,
+-        zIndex: 2147483000,
++        right,
++        bottom,
++        zIndex: PET_LAYER_Z_INDEX,
+       }}
+       onClick={props.summon}
+       data-testid="pet-summon"
+diff --git a/src/client/PetSettingsCard.tsx b/src/client/PetSettingsCard.tsx
+index 3cc0708dc336a55ae0832e2842c5d86e26680582..31c8da56998f7fce8cd2613dbdf0f73ef21f9cc3 100644
+--- a/src/client/PetSettingsCard.tsx
++++ b/src/client/PetSettingsCard.tsx
+@@ -86,6 +86,11 @@ export class PetSettingsCardController {
+   inject(): PetSettingsCardFace {
+     return { hooks: { petSettingsCard: this.store }, ...this.form.actions() }
+   }
++
++  /** Release the form's page-lifetime settings subscription. */
++  dispose(): void {
++    this.form.dispose()
++  }
+ }
+ 
+ /** Props the renderer binds for the pet settings card. */
+diff --git a/src/client/WhalePet.test.tsx b/src/client/WhalePet.test.tsx
+index 613655bd3adc381555cbb37acbebd66511827cb7..195fedde2044efadb37e489b00432b70289632fd 100644
+--- a/src/client/WhalePet.test.tsx
++++ b/src/client/WhalePet.test.tsx
+@@ -100,6 +100,12 @@ function fireComposingKeydown(target: Element, key: string): void {
+ }
+ 
+ describe('WhalePet rename input', () => {
++  it('stays below modal overlays', () => {
++    renderPet()
++    const sprite = screen.getByRole('button', { name: 'whale girl' })
++    expect(sprite.parentElement?.style.zIndex).toBe('900')
++  })
++
+   it('submits the draft on Enter outside composition', () => {
+     const { onRename } = renderPet()
+     const input = openRename()
+diff --git a/src/client/WhalePet.tsx b/src/client/WhalePet.tsx
+index 369dcf60d1a495b6a8c1cce60cdbc646453264d9..3453bb8b7d107d4ed60bbe33b1817ec6b89a52fd 100644
+--- a/src/client/WhalePet.tsx
++++ b/src/client/WhalePet.tsx
+@@ -25,6 +25,9 @@ export const PET_SPRITESHEET_URL = '/pet/whale/spritesheet.webp'
+ /** Browser URL of the whale-girl manifest (authoritative per-row frame counts). */
+ export const PET_MANIFEST_URL = '/pet/whale/pet.json'
+ 
++/** Keep the pet above normal app chrome while leaving modal overlays unobstructed. */
++export const PET_LAYER_Z_INDEX = 900
++
+ /** Props injected by the slot registration (store actions + locale). */
+ export interface WhalePetProps {
+   /** Latest host snapshot; null while loading. */
+@@ -54,6 +57,11 @@ function clampOffset(value: number, max: number): number {
+   return Math.max(0, Math.min(max, value))
+ }
+ 
++/** Keep the fixed navigation rail available when a saved position is clamped. */
++function leftRailClearance(): number {
++  return document.documentElement.dataset.dshDesktopPlatform === 'darwin' ? 90 : 56
++}
++
+ /**
+  * The floating pet. The spritesheet frame advances on requestAnimationFrame
+  * with per-frame durations from TRACKS; the atlas image is loaded once and
+@@ -215,8 +223,12 @@ export function WhalePet(props: WhalePetProps): ReactPortal {
+     const dx = e.clientX - drag.startX
+     const dy = e.clientY - drag.startY
+     if (Math.abs(dx) > 4 || Math.abs(dy) > 4) draggedRef.current = true
+-    const right = clampOffset(drag.right - dx, window.innerWidth - 40)
+-    const bottom = clampOffset(drag.bottom - dy, window.innerHeight - 40)
++    const petWidth = Math.round(FRAME_WIDTH * display.size / FRAME_HEIGHT)
++    const right = clampOffset(
++      drag.right - dx,
++      Math.max(0, window.innerWidth - petWidth - leftRailClearance()),
++    )
++    const bottom = clampOffset(drag.bottom - dy, Math.max(0, window.innerHeight - display.size))
+     setDragPos({ right, bottom })
+   }
+   const onPointerUp = (): void => {
+@@ -225,15 +237,22 @@ export function WhalePet(props: WhalePetProps): ReactPortal {
+     if (dragPos !== null) props.onDragEnd(dragPos.right, dragPos.bottom)
+   }
+ 
+-  const pos = dragPos ?? { right: display.right, bottom: display.bottom }
+   const spriteWidth = Math.round(FRAME_WIDTH * spriteScale)
+   const spriteHeight = Math.round(FRAME_HEIGHT * spriteScale)
++  const rawPos = dragPos ?? { right: display.right, bottom: display.bottom }
++  const pos = {
++    right: clampOffset(
++      rawPos.right,
++      Math.max(0, window.innerWidth - spriteWidth - leftRailClearance()),
++    ),
++    bottom: clampOffset(rawPos.bottom, Math.max(0, window.innerHeight - spriteHeight)),
++  }
+ 
+   const float = (
+     <div
+       ref={floatRef}
+       className={styles.float}
+-      style={{ right: pos.right, bottom: pos.bottom, zIndex: 2147483000 }}
++      style={{ right: pos.right, bottom: pos.bottom, zIndex: PET_LAYER_Z_INDEX }}
+       onPointerEnter={() => {
+         clearHideTimer()
+         setHovered(true)
+diff --git a/src/client/index.ts b/src/client/index.ts
+index 8e44b2343d0995b17c8652f21a49b5fde5bd9d45..e3518cfb1291610a5c5430eccb6eb676b3d51fa0 100644
+--- a/src/client/index.ts
++++ b/src/client/index.ts
+@@ -29,7 +29,7 @@ import { NS, en, zh, t } from './locales.ts'
+ 
+ /** The host pet API as the browser sees it (same-origin JSON endpoints). */
+ interface PetHttpApi {
+-  state(): Promise<PetStateView>
++  state(signal?: AbortSignal): Promise<PetStateView>
+   interact(kind: PetInteraction): Promise<PetInteractResult>
+   setVisible(visible: boolean): Promise<{ ok: true; display: PetDisplayConfig }>
+   setConfig(patch: Partial<PetDisplayConfig>): Promise<{ ok: true; display: PetDisplayConfig }>
+@@ -37,12 +37,13 @@ interface PetHttpApi {
+ }
+ 
+ /** Same-origin JSON fetch helper (GET without body, POST with JSON body). */
+-async function petFetch<T>(path: string, body?: unknown): Promise<T> {
++async function petFetch<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+   const response = await fetch(path, body === undefined
+-    ? {}
++    ? { signal }
+     : {
+         method: 'POST',
+         headers: { 'content-type': 'application/json' },
++        signal,
+         body: JSON.stringify(body),
+       })
+   if (!response.ok) {
+@@ -53,7 +54,7 @@ async function petFetch<T>(path: string, body?: unknown): Promise<T> {
+ 
+ /** The live host API instance (always defined; failures surface per call). */
+ const petApi: PetHttpApi = {
+-  state: () => petFetch('/api/pet/state'),
++  state: signal => petFetch('/api/pet/state', undefined, signal),
+   interact: (kind) => petFetch('/api/pet/interact', { kind }),
+   setVisible: (visible) => petFetch('/api/pet/set-visible', { visible }),
+   setConfig: (patch) => petFetch('/api/pet/set-config', patch),
+@@ -62,6 +63,10 @@ const petApi: PetHttpApi = {
+ 
+ /** Poll interval for the host snapshot. */
+ const POLL_MS = 800
++/** A wedged poll is released before it can occupy a browser connection indefinitely. */
++const POLL_REQUEST_TIMEOUT_MS = 5_000
++/** Failed polls back off so an unavailable host cannot create a request storm. */
++const POLL_MAX_BACKOFF_MS = 10_000
+ 
+ /** Settings namespace the pet settings card edits (the Host plugin registers it). */
+ const PET_SETTINGS_NS = 'pet'
+@@ -113,6 +118,9 @@ declare module '@deepseek-ai/cordis' {
+ export function apply(ctx: ClientContext): void {
+   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'pet: dictionaries')
+ 
++  const connection = ctx.get('connection') as { readonly isLoopback: boolean }
++  if (!connection.isLoopback) return
++
+   const binder = ctx.get('webUiSettings') ?? ctx.settingsScope
+   const settingsScope = binder.bind<PetSettings>({ namespace: PET_SETTINGS_NS })
+   const enabled = (): boolean => {
+@@ -148,47 +156,71 @@ export function apply(ctx: ClientContext): void {
+       const setState = petStore.actions.setState
+       const setFeedback = petStore.actions.setFeedback
+ 
++      // Self-scheduling polling keeps exactly one state request in flight. A
++      // fixed interval would pile up fetches when the browser connection pool
++      // or Host stalls, eventually starving settings and pairing requests.
++      let pollTimer: number | undefined
++      let pollController: AbortController | undefined
++      let pollInFlight: Promise<void> | undefined
++      let pollFailures = 0
++      let pollDisposed = false
++      const stopPollTimer = (): void => {
++        if (pollTimer === undefined) return
++        window.clearTimeout(pollTimer)
++        pollTimer = undefined
++      }
++      const schedulePoll = (): void => {
++        if (pollDisposed || pollTimer !== undefined || pollInFlight !== undefined) return
++        if (document.visibilityState !== 'visible') return
++        const delay = Math.min(POLL_MS * 2 ** pollFailures, POLL_MAX_BACKOFF_MS)
++        pollTimer = window.setTimeout(() => {
++          pollTimer = undefined
++          pollNow()
++        }, delay)
++      }
+       const pollNow = (): void => {
+-        petApi.state().then((snapshot) => {
++        if (pollDisposed || pollInFlight !== undefined) return
++        if (document.visibilityState !== 'visible') return
++        stopPollTimer()
++        const controller = new AbortController()
++        pollController = controller
++        let timedOut = false
++        const requestTimeout = window.setTimeout(() => {
++          timedOut = true
++          controller.abort()
++        }, POLL_REQUEST_TIMEOUT_MS)
++        const request = petApi.state(controller.signal).then((snapshot) => {
++          if (pollDisposed || controller.signal.aborted) return
++          pollFailures = 0
+           setSnapshot(snapshot)
+         }, () => {
++          if (pollDisposed || (controller.signal.aborted && !timedOut)) return
++          pollFailures += 1
+           setState('error', 'pet.state transport error')
++        }).finally(() => {
++          window.clearTimeout(requestTimeout)
++          if (pollController === controller) pollController = undefined
++          if (pollInFlight === request) pollInFlight = undefined
++          schedulePoll()
+         })
++        pollInFlight = request
+       }
+-
+-      const disposePoll = ctx.effect(() => {
+-        // Poll only while the tab is visible: the host snapshot does not
+-        // change while the page is hidden, so a background interval would
+-        // only burn RPCs (browser throttling is an unreliable backstop).
+-        // Coming back to the tab refreshes the pet immediately instead of
+-        // waiting out the next 800 ms cycle.
+-        let timer: number | undefined
+-        const stop = (): void => {
+-          if (timer !== undefined) {
+-            window.clearInterval(timer)
+-            timer = undefined
+-          }
+-        }
+-        const start = (): void => {
+-          if (timer === undefined && document.visibilityState === 'visible') {
+-            timer = window.setInterval(pollNow, POLL_MS)
+-          }
++      const onVisibility = (): void => {
++        if (document.visibilityState === 'visible') pollNow()
++        else {
++          stopPollTimer()
++          pollController?.abort()
+         }
+-        const onVisibility = (): void => {
+-          if (document.visibilityState === 'visible') {
+-            pollNow()
+-            start()
+-          } else {
+-            stop()
+-          }
+-        }
+-        start()
+-        document.addEventListener('visibilitychange', onVisibility)
+-        return () => {
+-          stop()
+-          document.removeEventListener('visibilitychange', onVisibility)
+-        }
+-      }, 'pet: poll')
++      }
++      document.addEventListener('visibilitychange', onVisibility)
++      pollNow()
++      const disposePoll = (): void => {
++        if (pollDisposed) return
++        pollDisposed = true
++        stopPollTimer()
++        pollController?.abort()
++        document.removeEventListener('visibilitychange', onVisibility)
++      }
+ 
+       const injected = (): PetInjected => ({
+         store: petStore,
+@@ -272,6 +304,12 @@ export function apply(ctx: ClientContext): void {
+       disposeUi = undefined
+     }
+   }
+-  settingsScope.subscribe(syncUi)
++  const disposeSettings = settingsScope.subscribe(syncUi)
++  ctx.effect(() => () => {
++    disposeSettings()
++    petSettings.dispose()
++    disposeUi?.()
++    disposeUi = undefined
++  }, 'pet: client lifecycle')
+   syncUi()
+ }
+diff --git a/src/client/settings-form.ts b/src/client/settings-form.ts
+index 54d45fd40c7de40f9f98b9d3a41b1cd124739a8c..6e37d2b46434f8ea04114687c5c1a7101f16e418 100644
+--- a/src/client/settings-form.ts
++++ b/src/client/settings-form.ts
+@@ -141,6 +141,7 @@ export class CardForm<T> {
+   private readonly specs: Map<string, FieldSpec>
+   private readonly staged = new Map<string, StagedEdit>()
+   private readonly listeners = new Set<() => void>()
++  private readonly disposeScope: () => void
+   private saving = false
+   private failed = false
+ 
+@@ -150,7 +151,7 @@ export class CardForm<T> {
+     specs: FieldSpec[],
+   ) {
+     this.specs = new Map(specs.map(spec => [spec.field, spec]))
+-    scope.subscribe(() => { this.publish() })
++    this.disposeScope = scope.subscribe(() => { this.publish() })
+   }
+ 
+   /** Publish a projection of this form, rebuilt whenever the scope or a draft changes. */
+@@ -160,6 +161,12 @@ export class CardForm<T> {
+     return store
+   }
+ 
++  /** Release the settings subscription and card projections on plugin teardown. */
++  dispose(): void {
++    this.disposeScope()
++    this.listeners.clear()
++  }
++
+   /** Read the card-level state: what the Host serves, and what a save would do. */
+   shell(): CardShell {
+     const snapshot = this.scope.getSnapshot()
+diff --git a/src/routes.ts b/src/routes.ts
+index f45157acf28b3e6feb219fa6adc93b3429e0f697..1b112031a0e9558d83cea94dc1ced618a9148647 100644
+--- a/src/routes.ts
++++ b/src/routes.ts
+@@ -45,6 +45,42 @@ function requireMethod(req: IncomingMessage, res: ServerResponse, method: string
+   return false
+ }
+ 
++/** Require a real loopback socket, loopback Host, and same-origin markers. */
++function requireLoopback(req: IncomingMessage, res: ServerResponse): boolean {
++  const address = req.socket.remoteAddress?.toLowerCase()
++  const v4 = address?.startsWith('::ffff:') === true ? address.slice('::ffff:'.length) : address
++  const octets = v4?.split('.') ?? []
++  const loopbackSocket = address === '::1'
++    || octets.length === 4
++      && octets[0] === '127'
++      && octets.every(octet => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
++  const rawHost = req.headers.host
++  let host: URL
++  try {
++    if (typeof rawHost !== 'string') throw new Error('missing-host')
++    host = new URL(`http://${rawHost}`)
++  } catch {
++    json(res, 403, { ok: false, error: 'loopback-request-required' })
++    return false
++  }
++  const hostOctets = host.hostname.split('.')
++  const loopbackHost = host.hostname === 'localhost' || host.hostname === '[::1]'
++    || hostOctets.length === 4
++      && hostOctets[0] === '127'
++      && hostOctets.every(octet => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
++  let sameOrigin = req.headers['sec-fetch-site'] !== 'cross-site'
++  if (sameOrigin && req.headers.origin !== undefined) {
++    try {
++      sameOrigin = new URL(req.headers.origin).host === host.host
++    } catch {
++      sameOrigin = false
++    }
++  }
++  if (loopbackSocket && loopbackHost && sameOrigin) return true
++  json(res, 403, { ok: false, error: 'loopback-request-required' })
++  return false
++}
++
+ /** Read a JSON request body (bounded). */
+ function readJsonBody(req: IncomingMessage): Promise<unknown> {
+   return new Promise((resolve, reject) => {
+@@ -83,6 +119,7 @@ function getRoute(path: string, run: () => Promise<unknown>): WebRoute {
+     path,
+     handler: (req: IncomingMessage, res: ServerResponse): void => {
+       if (!requireMethod(req, res, 'GET')) return
++      if (!requireLoopback(req, res)) return
+       run().then((value) => json(res, 200, value), (error) => {
+         json(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+       })
+@@ -97,6 +134,7 @@ function postRoute(path: string, run: (body: Record<string, unknown>) => Promise
+     path,
+     handler: (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+       if (!requireMethod(req, res, 'POST')) return Promise.resolve()
++      if (!requireLoopback(req, res)) return Promise.resolve()
+       return readJsonBody(req).then((body) => {
+         const record = (typeof body === 'object' && body !== null) ? body as Record<string, unknown> : {}
+         return run(record).then(
+@@ -149,6 +187,7 @@ export function makePetRoutes(deps: { service: PetService; packageRoot: string }
+         res.end()
+         return
+       }
++      if (!requireLoopback(req, res)) return
+       return readFile(join(packageRoot, 'assets', 'whale', file.name)).then((body) => {
+         res.writeHead(200, {
+           'content-type': file.mime,

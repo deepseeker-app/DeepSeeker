@@ -21,11 +21,11 @@ const SEED_FIXTURE = fileURLToPath(new URL('./snapshots/seeded-history/seed.json
 const PROMPT = 'Reply with the single word LIGHTHOUSE and stop.'
 const MODE = webSnapshotMode()
 
-/** Last AppFrame grid track in CSS pixels. */
+/** The shell-owned details track in CSS pixels (Aion may append more tracks). */
 async function detailsTrack(page: Page): Promise<number> {
   return await appFrame(page).evaluate((element) => {
     const tracks = getComputedStyle(element).gridTemplateColumns.split(' ')
-    return Number.parseFloat(tracks.at(-1) ?? 'NaN')
+    return Number.parseFloat(tracks[2] ?? 'NaN')
   })
 }
 
@@ -37,14 +37,14 @@ async function sidebarTrack(page: Page): Promise<number> {
   })
 }
 
-/** AppFrame is the only product element with an inline grid track template. */
+/** Resolve AppFrame through its stable overlay child instead of its mutable grid. */
 function appFrame(page: Page) {
-  return page.locator('[style*="grid-template-columns"]').first()
+  return page.locator('[data-shell-overlay]').locator('..')
 }
 
 /** Render the two column-resize handles without platform-dependent coordinates. */
 async function handleSnapshot(page: Page): Promise<string> {
-  const handles = await page.locator('[class*="handle"]').evaluateAll(elements =>
+  const handles = await appFrame(page).locator(':scope > [data-side]').evaluateAll(elements =>
     elements.map(element => ({
       side: element.getAttribute('data-side'),
       cursor: getComputedStyle(element).cursor,

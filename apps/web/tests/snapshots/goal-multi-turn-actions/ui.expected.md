@@ -202,6 +202,7 @@
   - img
 - tooltip "Branch into a new conversation"
 - text: {{clock}} Ran for {{duration}} TTFT {{duration}} {{throughput}} tok/s
+- button "插入图片引用，交给 describe_image 工具分析"
 - textbox "Message the agent"
 - button "Commands":
   - img
@@ -211,4 +212,4 @@
   - img
 - button "9% of context used"
 - button "Send message" [disabled]
-- text: 2 turns · 12 steps LLM {{duration}} · Tool call {{duration}} TTFT avg {{duration}} · {{throughput}} tok/s Cache hit 91% Input 113K tok · Output 2.4K tok
+- text: 2 turns · 12 steps LLM {{duration}} · Tool call {{duration}} TTFT avg {{duration}} · {{throughput}} tok/s Cache hit 91% Input 113K tok · Output 2.4K tok TPS {{throughput}} tok/s

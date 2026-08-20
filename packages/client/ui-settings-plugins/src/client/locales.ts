@@ -4,7 +4,7 @@
 export type PluginsSettingsLocaleKey =
   | 'nav' | 'title' | 'intro' | 'tabs' | 'configurableTab' | 'empty'
   | 'overridden' | 'reset' | 'readOnly' | 'expand' | 'collapse'
-  | 'save' | 'saving' | 'discard' | 'unsaved' | 'saveFailed' | 'invalidNumber'
+  | 'save' | 'saving' | 'discard' | 'unsaved' | 'saveFailed' | 'saveTimedOut' | 'saveError' | 'invalidNumber'
   | 'bashTitle' | 'bashDescription' | 'bashTimeoutMs' | 'bashTimeoutMsHint'
   | 'bashMaxOutputBytes' | 'bashMaxOutputBytesHint'
   | 'agentLoopTitle' | 'agentLoopDescription' | 'agentLoopMaxParallel' | 'agentLoopMaxParallelHint'
@@ -29,7 +29,9 @@ export const en: Record<PluginsSettingsLocaleKey, string> = {
   saving: 'Saving…',
   discard: 'Discard',
   unsaved: 'Unsaved',
-  saveFailed: 'The deployment did not accept these values; they were left for you to correct.',
+  saveFailed: 'Save failed. Your edits are still here; try again.',
+  saveTimedOut: 'The request took too long. Check the connection and retry.',
+  saveError: 'The settings service could not finish the request.',
   invalidNumber: 'Enter a number, or leave blank to use the default.',
   bashTitle: 'Shell',
   bashDescription: 'Limits every command the agent runs.',
@@ -70,7 +72,9 @@ export const zh: Record<PluginsSettingsLocaleKey, string> = {
   saving: '保存中…',
   discard: '放弃修改',
   unsaved: '未保存',
-  saveFailed: '本部署没有接受这些值，已保留供你修改。',
+  saveFailed: '保存失败，修改还在，可以重试。',
+  saveTimedOut: '请求超时了，检查网络后再试。',
+  saveError: '设置服务没能完成这次请求。',
   invalidNumber: '请填数字；留空表示使用默认值。',
   bashTitle: '终端',
   bashDescription: '限制 agent 运行的每一条命令。',

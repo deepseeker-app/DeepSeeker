@@ -72,5 +72,6 @@ This matrix shows which packages dispatch each harness-owned event and which pac
 | `internal/plugin` | - | `loader`, [`lsp-stdio`](../packages/lsp/lsp-stdio), `webserver` |
 | `internal/service` | - | [`agent-presets`](../packages/preset/agent-presets), `gateway` |
 | `internal/status` | - | [`agent`](../packages/core/agent) |
+| `remote-web-ui/authorization-changed` | - | `connection` |
 
 Maintenance mode: generated: Cordis event declarations and producer/listener edges are resolved from the repository TypeScript Program.

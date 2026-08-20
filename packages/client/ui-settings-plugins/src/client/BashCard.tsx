@@ -20,7 +20,7 @@ export type BashCardProps =
 export function BashCard(props: BashCardProps) {
   const { t } = props
   const state = props.useBashCard(snapshot => snapshot)
-  const disabled = !state.writable
+  const disabled = !state.writable || state.saving
   return (
     <PluginCard
       t={t}

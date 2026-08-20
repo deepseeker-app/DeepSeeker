@@ -8,7 +8,7 @@
  * loading page, lists the per-entry fiber states and the sweep report (fail
  * loud, no partial UI).
  */
-import { useSyncExternalStore } from 'react'
+import { useEffect, useSyncExternalStore } from 'react'
 import type { ReactNode } from 'react'
 import type { KernelSignal, LoaderStatus } from './loader-status.ts'
 import css from './AppRoot.module.css'
@@ -21,8 +21,23 @@ export interface AppRootProps {
   status: KernelSignal<LoaderStatus>
   /** Boot failure report (the settle rejection message); undefined while loading or after success. */
   error: KernelSignal<string | undefined>
-  /** Builds the real UI; called only after settled. */
+  /** Current assembled application renderer; absent while its Cordis service is reloading. */
+  appShell: KernelSignal<AppShellRenderer | undefined>
+}
+
+/** Small service face AppRoot needs without importing the shell plugin module. */
+export interface AppShellRenderer {
+  /** Build and render the assembled application. */
   renderApp: () => ReactNode
+}
+
+/** Render the assembled application and publish readiness after React commits it. */
+function ReadyApp({ renderApp }: AppShellRenderer) {
+  useEffect(() => {
+    document.documentElement.setAttribute('data-dsh-app-ready', 'true')
+    return () => { document.documentElement.removeAttribute('data-dsh-app-ready') }
+  }, [])
+  return <>{renderApp()}</>
 }
 
 /** Boot gate: loading page until the boot settles; failures stay here. */
@@ -30,9 +45,10 @@ export function AppRoot(props: AppRootProps) {
   const settled = useSyncExternalStore(props.settled.subscribe, props.settled.getSnapshot)
   const status = useSyncExternalStore(props.status.subscribe, props.status.getSnapshot)
   const error = useSyncExternalStore(props.error.subscribe, props.error.getSnapshot)
+  const appShell = useSyncExternalStore(props.appShell.subscribe, props.appShell.getSnapshot)
   const failed = Object.entries(status).filter(([, s]) => s === 'failed')
 
-  if (settled) return <>{props.renderApp()}</>
+  if (settled && appShell !== undefined) return <ReadyApp renderApp={appShell.renderApp} />
 
   const loud = error !== undefined || failed.length > 0
 

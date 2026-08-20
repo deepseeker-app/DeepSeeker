@@ -13,7 +13,7 @@
  * belongs to the webserver config, and this fence is not an auth layer.
  */
 
-import type { IncomingHttpHeaders } from 'node:http'
+import type { IncomingHttpHeaders, IncomingMessage } from 'node:http'
 import { isLoopbackHostname } from './loopback-hostname.ts'
 
 /** The request facts the fence reads from either HTTP representation. */
@@ -25,6 +25,11 @@ function header(headers: IncomingHttpHeaders | Headers, name: string): string | 
   if (headers instanceof Headers) return headers.get(name) ?? undefined
   const value = headers[name]
   return typeof value === 'string' ? value : undefined
+}
+
+function hasHeader(headers: IncomingHttpHeaders | Headers, name: string): boolean {
+  if (headers instanceof Headers) return headers.has(name)
+  return headers[name] !== undefined
 }
 
 /** Normalized URL of a Host-header authority (hostname lowercased, default port stripped, IPv6 bracketed), or undefined when unparsable. */
@@ -106,6 +111,57 @@ export function isTrustedApiRequest(request: ApiTrustRequest, trustedHosts: read
   const hostUrl = parseAuthority(host)
   if (hostUrl === undefined) return false
   if (!isLoopbackHostname(hostUrl.hostname) && !isTrustedAuthority(hostUrl, trustedHosts)) return false
+  return markersAreSameOrigin(request, hostUrl)
+}
+
+/**
+ * Check browser origin markers independently of the static Host allowlist.
+ * Authenticated dynamic authorities still need this cross-site request fence.
+ * @param request - Node HTTP or Fetch request facts (headers).
+ * @returns true when the Host parses and attached browser markers are same-origin.
+ */
+export function hasSameOriginBrowserMarkers(request: ApiTrustRequest): boolean {
+  const host = header(request.headers, 'host')
+  if (host === undefined) return false
+  const hostUrl = parseAuthority(host)
+  if (hostUrl === undefined) return false
+  return markersAreSameOrigin(request, hostUrl)
+}
+
+/**
+ * Whether a Node request is genuinely local: loopback Host, same-origin
+ * browser markers, a loopback TCP peer, and no reverse-proxy client headers.
+ * Host alone is forgeable by a LAN client, while socket alone also describes
+ * a reverse proxy such as cloudflared, so the desktop shortcut requires every
+ * direct-request signal.
+ * @param request - the Node HTTP request to classify.
+ * @returns true only for a direct loopback request with no proxy client headers.
+ */
+export function isLoopbackApiRequest(request: IncomingMessage): boolean {
+  const forwarded = ['cf-connecting-ip', 'x-forwarded-for', 'forwarded', 'x-real-ip']
+    .some(name => hasHeader(request.headers, name))
+  return !forwarded
+    && isTrustedApiRequest(request, [])
+    && isLoopbackSocketAddress(request.socket.remoteAddress)
+}
+
+/**
+ * Loopback socket predicate for IPv4, IPv6, and IPv4-mapped IPv6.
+ * @param address - the socket remote address.
+ * @returns true when the address is in an accepted loopback representation.
+ */
+export function isLoopbackSocketAddress(address: string | undefined): boolean {
+  if (address === undefined) return false
+  const normalized = address.toLowerCase()
+  if (normalized === '::1') return true
+  const v4 = normalized.startsWith('::ffff:') ? normalized.slice('::ffff:'.length) : normalized
+  const octets = v4.split('.')
+  return octets.length === 4
+    && octets[0] === '127'
+    && octets.every(octet => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
+}
+
+function markersAreSameOrigin(request: ApiTrustRequest, hostUrl: URL): boolean {
   // Cross-site fence: modern browsers label the initiator relationship on
   // every fetch; an explicit cross-site marker is refused regardless of Origin.
   if (header(request.headers, 'sec-fetch-site') === 'cross-site') return false

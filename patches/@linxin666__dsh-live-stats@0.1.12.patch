@@ -1,0 +1,263 @@
+diff --git a/lib/index.js b/lib/index.js
+index ab1782aae83c552eebf14840157d8c8f32714555..73f3b6f8750d2156237efedf2206dbb27be86a20 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -129,25 +129,27 @@ function surfaceMessage(event) {
+ }
+ function applySurface(state, event, spec) {
+ 	const tokens = estimateMessageTokens(surfaceMessage(event), spec);
++	const surface = { ...state.surface };
+ 	if (event.surfaceOp === "append") {
+-		state.surface.set(event.seq, tokens);
++		surface[String(event.seq)] = tokens;
+ 		return {
+-			surface: state.surface,
++			surface,
+ 			surfaceTokens: state.surfaceTokens + tokens
+ 		};
+ 	}
+ 	const operation = event.surfaceOp;
+-	if (!state.surface.has(operation.start) || !state.surface.has(operation.end) || operation.start > operation.end) throw new Error("live-stats: replace at seq " + event.seq + " has invalid current range " + operation.start + "-" + operation.end);
++	if (!(String(operation.start) in surface) || !(String(operation.end) in surface) || operation.start > operation.end) throw new Error("live-stats: replace at seq " + event.seq + " has invalid current range " + operation.start + "-" + operation.end);
+ 	let removed = 0;
+-	for (const [seq, nodeTokens] of state.surface) {
++	for (const [rawSeq, nodeTokens] of Object.entries(surface)) {
++		const seq = Number(rawSeq);
+ 		if (seq < operation.start) continue;
+-		if (seq > operation.end) break;
++		if (seq > operation.end) continue;
+ 		removed += nodeTokens;
+-		state.surface.delete(seq);
++		delete surface[rawSeq];
+ 	}
+-	state.surface.set(event.seq, tokens);
++	surface[String(event.seq)] = tokens;
+ 	return {
+-		surface: state.surface,
++		surface,
+ 		surfaceTokens: state.surfaceTokens - removed + tokens
+ 	};
+ }
+@@ -224,7 +226,7 @@ function exactStep(step, usage, time) {
+ 		...step,
+ 		buckets: bucketsFrom(usage),
+ 		exact: true,
+-		blocks: [],
++		blocks: {},
+ 		pricedTokens: 0,
+ 		pricedBlocks: 0,
+ 		...usage.outputTokens > 0 ? {
+@@ -257,9 +259,8 @@ function createLiveTokenUsageProjectionDefinition(spec) {
+ 			settled: zeroBuckets(),
+ 			settledEstimates: 0,
+ 			last: null,
+-			surface: /* @__PURE__ */ new Map(),
++			surface: {},
+ 			surfaceTokens: 0,
+-			header: void 0,
+ 			active: null
+ 		}),
+ 		apply: (state, event) => {
+@@ -273,7 +274,7 @@ function createLiveTokenUsageProjectionDefinition(spec) {
+ 						uncachedInputTokens: estimateHeaderTokens(state.header, spec) + state.surfaceTokens
+ 					},
+ 					exact: false,
+-					blocks: [],
++					blocks: {},
+ 					pricedTokens: 0,
+ 					pricedBlocks: 0
+ 				}
+@@ -328,6 +329,7 @@ function createLiveTokenUsageProjectionDefinition(spec) {
+ 				const active = next.active;
+ 				const rate = rateOf(active);
+ 				const previous = next.last?.turn === active.turn && next.last.step === active.step ? next.last : void 0;
++				const tokensPerSecond = rate ?? state.last?.tokensPerSecond;
+ 				next = {
+ 					...next,
+ 					settled: addReplacing(next.settled, previous?.buckets, active.buckets),
+@@ -337,7 +339,7 @@ function createLiveTokenUsageProjectionDefinition(spec) {
+ 						step: active.step,
+ 						buckets: active.buckets,
+ 						estimated: !active.exact,
+-						tokensPerSecond: rate ?? state.last?.tokensPerSecond
++						...tokensPerSecond === void 0 ? {} : { tokensPerSecond }
+ 					},
+ 					active: null
+ 				};
+@@ -354,7 +356,7 @@ function createLiveTokenUsageProjectionDefinition(spec) {
+ 			return next;
+ 		},
+ 		view,
+-		stateVersion: 2
++		stateVersion: 3
+ 	};
+ }
+ //#endregion
+diff --git a/lib/types/projection.d.ts b/lib/types/projection.d.ts
+index 4b7d773eeacf36aa88e347c05d4273e903a40095..b68f963b9ef371ef1f6e85ff9fc945b31b6a102a 100644
+--- a/lib/types/projection.d.ts
++++ b/lib/types/projection.d.ts
+@@ -22,7 +22,8 @@ interface ActiveStep {
+     step: number;
+     buckets: TokenUsageProjection;
+     exact: boolean;
+-    blocks: Array<OutputBlock | undefined>;
++    /** Sparse block index without Array holes, so checkpoint state stays plain JSON. */
++    blocks: Record<string, OutputBlock>;
+     /** Running sum of the per-block estimates of every non-undefined block. */
+     pricedTokens: number;
+     /** Count of non-undefined blocks (guards the role overhead and zero case). */
+@@ -36,16 +37,16 @@ interface SettledSample {
+     buckets: TokenUsageProjection;
+     estimated: boolean;
+     /** Last measured throughput; carried across rate-less steps. */
+-    tokensPerSecond: number | undefined;
++    tokensPerSecond?: number;
+ }
+ interface State {
+     settled: TokenUsageProjection;
+     settledEstimates: number;
+     last: SettledSample | null;
+     /** Surface message seq -> estimated tokens, kept in increasing seq order. */
+-    surface: Map<number, number>;
++    surface: Record<string, number>;
+     surfaceTokens: number;
+-    header: EpochHeader | undefined;
++    header?: EpochHeader;
+     active: ActiveStep | null;
+ }
+ /** Create the replayable live usage projection consumed by DSH Web and the TPS row.
+diff --git a/src/projection.ts b/src/projection.ts
+index 6fb085c9205851dd3f961c8ab62bc48a8012db59..8a8720dd66d1f1bd43b19ec475b2d83d9c014741 100644
+--- a/src/projection.ts
++++ b/src/projection.ts
+@@ -64,7 +64,8 @@ interface ActiveStep {
+   step: number
+   buckets: TokenUsageProjection
+   exact: boolean
+-  blocks: Array<OutputBlock | undefined>
++  /** Sparse block index without Array holes, so checkpoint state stays plain JSON. */
++  blocks: Record<string, OutputBlock>
+   /** Running sum of the per-block estimates of every non-undefined block. */
+   pricedTokens: number
+   /** Count of non-undefined blocks (guards the role overhead and zero case). */
+@@ -79,7 +80,7 @@ interface SettledSample {
+   buckets: TokenUsageProjection
+   estimated: boolean
+   /** Last measured throughput; carried across rate-less steps. */
+-  tokensPerSecond: number | undefined
++  tokensPerSecond?: number
+ }
+ 
+ interface State {
+@@ -87,9 +88,9 @@ interface State {
+   settledEstimates: number
+   last: SettledSample | null
+   /** Surface message seq -> estimated tokens, kept in increasing seq order. */
+-  surface: Map<number, number>
++  surface: Record<string, number>
+   surfaceTokens: number
+-  header: EpochHeader | undefined
++  header?: EpochHeader
+   active: ActiveStep | null
+ }
+ 
+@@ -109,32 +110,33 @@ function applySurface(
+   spec: EstimatorSpec,
+ ): Pick<State, 'surface' | 'surfaceTokens'> {
+   const tokens = estimateMessageTokens(surfaceMessage(event), spec)
++  const surface = { ...state.surface }
+   if (event.surfaceOp === 'append') {
+-    state.surface.set(event.seq, tokens)
++    surface[String(event.seq)] = tokens
+     return {
+-      surface: state.surface,
++      surface,
+       surfaceTokens: state.surfaceTokens + tokens,
+     }
+   }
+   const operation = event.surfaceOp
+-  if (!state.surface.has(operation.start) || !state.surface.has(operation.end) || operation.start > operation.end) {
++  if (!(String(operation.start) in surface)
++    || !(String(operation.end) in surface)
++    || operation.start > operation.end) {
+     throw new Error(
+       'live-stats: replace at seq ' + event.seq + ' has invalid current range ' + operation.start + '-' + operation.end,
+     )
+   }
+-  // Keys enter in increasing seq order (appends grow, and a replace's own
+-  // seq is always the newest), so one pass with an early exit removes the
+-  // exact range. Deleting entries while iterating a Map is safe.
+   let removed = 0
+-  for (const [seq, nodeTokens] of state.surface) {
++  for (const [rawSeq, nodeTokens] of Object.entries(surface)) {
++    const seq = Number(rawSeq)
+     if (seq < operation.start) continue
+-    if (seq > operation.end) break
++    if (seq > operation.end) continue
+     removed += nodeTokens
+-    state.surface.delete(seq)
++    delete surface[rawSeq]
+   }
+-  state.surface.set(event.seq, tokens)
++  surface[String(event.seq)] = tokens
+   return {
+-    surface: state.surface,
++    surface,
+     surfaceTokens: state.surfaceTokens - removed + tokens,
+   }
+ }
+@@ -226,7 +228,7 @@ function exactStep(step: ActiveStep, usage: TokenUsage, time: number): ActiveSte
+     exact: true,
+     // The exact usage supersedes every block priced from streamed deltas;
+     // retain only the exact buckets so later deltas cannot re-estimate.
+-    blocks: [],
++    blocks: {},
+     pricedTokens: 0,
+     pricedBlocks: 0,
+     ...(usage.outputTokens > 0
+@@ -276,9 +278,8 @@ export function createLiveTokenUsageProjectionDefinition(
+       settled: zeroBuckets(),
+       settledEstimates: 0,
+       last: null,
+-      surface: new Map(),
++      surface: {},
+       surfaceTokens: 0,
+-      header: undefined,
+       active: null,
+     }),
+     apply: (state, event: SessionEvent) => {
+@@ -293,7 +294,7 @@ export function createLiveTokenUsageProjectionDefinition(
+               uncachedInputTokens: estimateHeaderTokens(state.header, spec) + state.surfaceTokens,
+             },
+             exact: false,
+-            blocks: [],
++            blocks: {},
+             pricedTokens: 0,
+             pricedBlocks: 0,
+           },
+@@ -353,6 +354,7 @@ export function createLiveTokenUsageProjectionDefinition(
+         const previous = next.last?.turn === active.turn && next.last.step === active.step
+           ? next.last
+           : undefined
++        const tokensPerSecond = rate ?? state.last?.tokensPerSecond
+         next = {
+           ...next,
+           settled: addReplacing(next.settled, previous?.buckets, active.buckets),
+@@ -366,7 +368,7 @@ export function createLiveTokenUsageProjectionDefinition(
+             estimated: !active.exact,
+             // Carry the last measured rate across a rate-less step instead of
+             // clobbering it: the row stays resident (see view()).
+-            tokensPerSecond: rate ?? state.last?.tokensPerSecond,
++            ...(tokensPerSecond === undefined ? {} : { tokensPerSecond }),
+           },
+           active: null,
+         }
+@@ -386,6 +388,6 @@ export function createLiveTokenUsageProjectionDefinition(
+       return next
+     },
+     view,
+-    stateVersion: 2,
++    stateVersion: 3,
+   }
+ }

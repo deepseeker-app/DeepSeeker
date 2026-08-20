@@ -3,7 +3,10 @@ name: CI
 on:
   push:
     branches: [master]
+  # DeepSeeker's main branch uses the hosted fork workflow below; this upstream
+  # workflow depends on DeepSeek-owned runner labels and remains scoped to master.
   pull_request:
+    branches: [master]
   workflow_dispatch:
     inputs:
       suite:

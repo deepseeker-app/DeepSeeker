@@ -4,13 +4,43 @@ import { createServer, request as httpRequest } from 'node:http'
 import { PassThrough, Readable } from 'node:stream'
 import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it } from 'vitest'
+import WebSocket from 'ws'
 import type { AddressInfo } from 'node:net'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy/api'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { RpcId, type ClientRequest } from '@deepseek-ai/dsh-host-apiproxy/api'
 import type { WebServer, WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
-import { API_PATH, apply, HOST_EVENTS_PATH, inject, MUX_EVENTS_PATH, type HostConnectionHandle } from '../src/index.ts'
+import {
+  API_PATH,
+  apply,
+  HOST_EVENTS_PATH,
+  inject,
+  MUX_EVENTS_PATH,
+  type ConnectionConfig,
+  type HostConnectionHandle,
+} from '../src/index.ts'
+
+async function untilAbort(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return
+  await new Promise<void>((resolve) => {
+    signal.addEventListener('abort', () => { resolve() }, { once: true })
+  })
+}
+
+async function * idleFrames(signal: AbortSignal): AsyncGenerator<never> {
+  await untilAbort(signal)
+}
+
+function fakeApiProxy(): ApiProxy {
+  const events: ApiProxy['events'] = {
+    mux: (_request, signal) => idleFrames(signal),
+    host: (_request, signal) => idleFrames(signal),
+  }
+  return {
+    events,
+  } as unknown as ApiProxy
+}
 
 /** Structural webServer fake recording both route registries. */
 function fakeHttpServer(
@@ -35,23 +65,32 @@ function fakeHttpServer(
 }
 
 /** Bodyless GET carrying the given headers (enough for the trust fence + bridge). */
-function fakeRequest(headers: Record<string, string>, url = `${API_PATH}/session.list`): IncomingMessage {
+function fakeRequest(
+  headers: Record<string, string>,
+  url = `${API_PATH}/session.list`,
+  remoteAddress = '127.0.0.1',
+): IncomingMessage {
   const request = Readable.from([]) as unknown as IncomingMessage
-  Object.assign(request, { url, method: 'GET', headers })
+  Object.assign(request, { url, method: 'GET', headers, socket: { remoteAddress } })
   return request
 }
 
 /** JSON POST carrying a complete client-request envelope. */
 function fakePost(headers: Record<string, string>, url: string, body: unknown): IncomingMessage {
   const request = Readable.from([Buffer.from(JSON.stringify(body))]) as unknown as IncomingMessage
-  Object.assign(request, { url, method: 'POST', headers: { 'content-type': 'application/json', ...headers } })
+  Object.assign(request, {
+    url,
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...headers },
+    socket: { remoteAddress: '127.0.0.1' },
+  })
   return request
 }
 
 /** Raw POST for malformed-body and media-type boundary cases. */
 function fakeRawPost(headers: Record<string, string>, url: string, body: string): IncomingMessage {
   const request = Readable.from([Buffer.from(body)]) as unknown as IncomingMessage
-  Object.assign(request, { url, method: 'POST', headers })
+  Object.assign(request, { url, method: 'POST', headers, socket: { remoteAddress: '127.0.0.1' } })
   return request
 }
 
@@ -74,7 +113,8 @@ function fakeResponse(): { response: ServerResponse; state: { status?: number; b
   return { response, state }
 }
 
-async function mounted(config?: { trustedHosts?: string[] }): Promise<{
+async function mounted(config?: ConnectionConfig): Promise<{
+  ctx: Context
   routes: WebRoute[]
   upgrades: WebUpgradeRoute[]
   dispose: () => Promise<void>
@@ -83,10 +123,10 @@ async function mounted(config?: { trustedHosts?: string[] }): Promise<{
   const routes: WebRoute[] = []
   const upgrades: WebUpgradeRoute[] = []
   ctx.provide('webServer', fakeHttpServer(routes, upgrades) as WebServer)
-  ctx.provide('apiProxy', {} as unknown as ApiProxy)
+  ctx.provide('apiProxy', fakeApiProxy())
   const fiber = ctx.plugin({ inject: [...inject], apply }, config)
   await fiber.await()
-  return { routes, upgrades, dispose: () => fiber.dispose() }
+  return { ctx, routes, upgrades, dispose: () => fiber.dispose() }
 }
 
 describe('connection node half', () => {
@@ -161,13 +201,74 @@ describe('connection node half', () => {
     await dispose()
   })
 
+  it('accepts a paired remote authority without opening cross-site requests', async () => {
+    const { ctx, routes, dispose } = await mounted()
+    let authorizerCalls = 0
+    ctx.on('remote-web-ui/authorize-http', (request) => {
+      authorizerCalls += 1
+      return request.headers.cookie === 'dsh_pair=paired-device' ? 'allow' : 'deny'
+    })
+
+    const paired = fakeResponse()
+    await routes[0]!.handler(fakeRequest({
+      host: 'fresh-tunnel.trycloudflare.com',
+      origin: 'https://fresh-tunnel.trycloudflare.com',
+      'sec-fetch-site': 'same-origin',
+      cookie: 'dsh_pair=paired-device',
+    }), paired.response)
+    expect(paired.state.status).toBe(404)
+    expect(authorizerCalls).toBe(1)
+
+    const crossSite = fakeResponse()
+    await routes[0]!.handler(fakeRequest({
+      host: 'fresh-tunnel.trycloudflare.com',
+      origin: 'https://attacker.example',
+      'sec-fetch-site': 'cross-site',
+      cookie: 'dsh_pair=paired-device',
+    }), crossSite.response)
+    expect(crossSite.state).toMatchObject({ status: 403, body: 'forbidden' })
+    expect(authorizerCalls).toBe(1)
+    await dispose()
+  })
+
+  it('does not let a loopback Host spoof the desktop shortcut over a remote socket', async () => {
+    const { routes, dispose } = await mounted()
+    const denied = fakeResponse()
+    await routes[0]!.handler(fakeRequest(
+      { host: '127.0.0.1:3080' },
+      `${API_PATH}/session.list`,
+      '203.0.113.9',
+    ), denied.response)
+    expect(denied.state).toMatchObject({ status: 403, body: 'forbidden' })
+    await dispose()
+  })
+
+  it.each([
+    'cf-connecting-ip',
+    'x-forwarded-for',
+    'forwarded',
+    'x-real-ip',
+  ])('does not grant the desktop shortcut when %s marks a proxy hop', async (proxyHeader) => {
+    const { routes, dispose } = await mounted()
+    const denied = fakeResponse()
+    await routes[0]!.handler(fakeRequest({
+      host: '127.0.0.1:3080',
+      [proxyHeader]: '203.0.113.9',
+    }), denied.response)
+    expect(denied.state).toMatchObject({ status: 403, body: 'forbidden' })
+    await dispose()
+  })
+
   it('pins privileged methods to loopback even for a declared trusted authority', async () => {
-    const { routes, dispose } = await mounted({ trustedHosts: ['harness.example'] })
+    const { ctx, routes, dispose } = await mounted({ trustedHosts: ['harness.example'] })
+    // Simulate a valid paired device. Authentication admits ordinary API
+    // reads, but it must not turn Host settings or native actions into remote
+    // capabilities.
+    ctx.on('remote-web-ui/authorize-http', () => 'allow')
     // The privileged set: native dialogs plus the whole settings/credential
     // configuration plane, reads included, plus the one method that makes the
-    // host fetch a caller-chosen URL. The same declared authority reaches
-    // ordinary reads (carrier-level 404 from the empty proxy proves the fence
-    // passed), but each privileged method stays loopback-only and 403s.
+    // host fetch a caller-chosen URL. The same paired authority reaches
+    // ordinary reads, but each privileged method stays loopback-only.
     for (const method of [
       'host.pickDirectory', 'host.openPath',
       'settings.describe', 'settings.openDocument', 'settings.update', 'settings.replace', 'settings.mutate',
@@ -188,28 +289,45 @@ describe('connection node half', () => {
     }
     const read = fakeResponse()
     await routes[0]!.handler(fakeRequest({ host: 'harness.example' }), read.response)
-    expect(read.state.status).not.toBe(403)
+    expect(read.state.status).toBe(404)
     await dispose()
   })
 
-  it('passes loopback and declared-authority requests through to the bridge', async () => {
+  it('preserves declared authorities when no remote authorizer is mounted', async () => {
     const { routes, dispose } = await mounted({ trustedHosts: ['harness.example:3080', '192.168.1.5'] })
     // Loopback, no browser markers (curl shape): the fence passes; the carrier
     // answers 404 for a GET unary path — proof the bridge ran.
     const loopback = fakeResponse()
     await routes[0]!.handler(fakeRequest({ host: '127.0.0.1:3080' }), loopback.response)
     expect(loopback.state.status).toBe(404)
-    // An all-interfaces composition derives port-less LAN IP literals, which
-    // pass markerless curl on any port.
+    // Legacy all-interface deployments use declared LAN literals without the
+    // optional remote-web-ui plugin.
     const lan = fakeResponse()
-    await routes[0]!.handler(fakeRequest({ host: '192.168.1.5:3080' }), lan.response)
+    await routes[0]!.handler(fakeRequest(
+      { host: '192.168.1.5:3080' },
+      `${API_PATH}/session.list`,
+      '192.168.1.20',
+    ), lan.response)
     expect(lan.state.status).toBe(404)
-    // Declared public authority, same-origin browser shape.
+    // A declared same-origin browser authority follows the same fallback.
     const declared = fakeResponse()
     await routes[0]!.handler(fakeRequest({
       host: 'harness.example:3080', origin: 'http://harness.example:3080', 'sec-fetch-site': 'same-origin',
     }), declared.response)
     expect(declared.state.status).toBe(404)
+    await dispose()
+  })
+
+  it('lets an installed remote authorizer veto a declared authority', async () => {
+    const { ctx, routes, dispose } = await mounted({ trustedHosts: ['harness.example'] })
+    ctx.on('remote-web-ui/authorize-http', () => 'deny')
+    const denied = fakeResponse()
+    await routes[0]!.handler(fakeRequest({
+      host: 'harness.example',
+      origin: 'http://harness.example',
+      'sec-fetch-site': 'same-origin',
+    }, `${API_PATH}/session.list`, '192.168.1.20'), denied.response)
+    expect(denied.state).toMatchObject({ status: 403, body: 'forbidden' })
     await dispose()
   })
 
@@ -453,12 +571,274 @@ describe('connection node half over a real HTTP server', () => {
     })
   }
 
+  /** One real JSON-envelope RPC POST. */
+  function callRpc(port: number, method: string, host: string, payload: unknown): Promise<number> {
+    return new Promise((resolve, reject) => {
+      const body = JSON.stringify({
+        type: 'client-request', rpcId: `rpc-${method}`, method, payload,
+      })
+      const request = httpRequest(
+        {
+          host: '127.0.0.1',
+          port,
+          path: `${API_PATH}/${method}`,
+          method: 'POST',
+          headers: {
+            host,
+            'content-type': 'application/json',
+            'content-length': Buffer.byteLength(body),
+          },
+        },
+        (response) => {
+          response.resume()
+          response.on('end', () => { resolve(response.statusCode ?? 0) })
+        },
+      )
+      request.on('error', reject)
+      request.end(body)
+    })
+  }
+
+  async function serveWithUpgrades(
+    routes: WebRoute[],
+    upgrades: WebUpgradeRoute[],
+  ): Promise<{ port: number; close: () => Promise<void> }> {
+    const server = createServer((request, response) => {
+      const route = routes.find(candidate => (request.url ?? '').startsWith(candidate.path))
+      if (route === undefined) {
+        response.writeHead(404)
+        response.end()
+        return
+      }
+      void route.handler(request, response)
+    })
+    server.on('upgrade', (request, socket, head) => {
+      const pathname = new URL(request.url ?? '/', 'http://dsh.internal').pathname
+      const route = upgrades.find(candidate => candidate.path === pathname)
+      if (route === undefined) {
+        socket.destroy()
+        return
+      }
+      void route.handler(request, socket, head)
+    })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as AddressInfo).port
+    return {
+      port,
+      close: () => new Promise<void>((resolve, reject) => {
+        server.close((error) => {
+          if (error === undefined || error === null) resolve()
+          else reject(error)
+        })
+      }),
+    }
+  }
+
+  function webSocketStatus(
+    port: number,
+    path: string,
+    headers: Record<string, string>,
+  ): Promise<number> {
+    return new Promise((resolve, reject) => {
+      const socket = new WebSocket(`ws://127.0.0.1:${String(port)}${path}`, { headers })
+      socket.once('open', () => {
+        const closed = once(socket, 'close')
+        socket.close()
+        void closed.then(() => { resolve(101) }, reject)
+      })
+      socket.once('unexpected-response', (_request, response) => {
+        const status = response.statusCode ?? 0
+        response.resume()
+        response.once('end', () => { resolve(status) })
+      })
+      socket.once('error', reject)
+    })
+  }
+
+  async function openWebSocket(
+    port: number,
+    path: string,
+    headers: Record<string, string> = {},
+  ): Promise<WebSocket> {
+    const socket = new WebSocket(`ws://127.0.0.1:${String(port)}${path}`, { headers })
+    await once(socket, 'open')
+    return socket
+  }
+
+  it('applies no-listener, allow, deny, and same-origin decisions to WebSocket upgrades', async () => {
+    const mountedApp = await mounted({ trustedHosts: ['harness.example'] })
+    const server = await serveWithUpgrades(mountedApp.routes, mountedApp.upgrades)
+    try {
+      expect(await webSocketStatus(server.port, MUX_EVENTS_PATH, {
+        host: 'harness.example',
+        origin: 'http://harness.example',
+        'sec-fetch-site': 'same-origin',
+      })).toBe(101)
+
+      const removeDeny = mountedApp.ctx.on('remote-web-ui/authorize-http', () => 'deny')
+      expect(await webSocketStatus(server.port, MUX_EVENTS_PATH, {
+        host: 'harness.example',
+        origin: 'http://harness.example',
+        'sec-fetch-site': 'same-origin',
+      })).toBe(403)
+      removeDeny()
+
+      mountedApp.ctx.on('remote-web-ui/authorize-http', () => 'allow')
+      expect(await webSocketStatus(server.port, HOST_EVENTS_PATH, {
+        host: 'fresh.trycloudflare.com',
+        origin: 'https://fresh.trycloudflare.com',
+        'sec-fetch-site': 'same-origin',
+        cookie: 'dsh_pair=paired-device',
+      })).toBe(101)
+      expect(await webSocketStatus(server.port, HOST_EVENTS_PATH, {
+        host: 'fresh.trycloudflare.com',
+        origin: 'https://attacker.example',
+        'sec-fetch-site': 'cross-site',
+        cookie: 'dsh_pair=paired-device',
+      })).toBe(403)
+    } finally {
+      await mountedApp.dispose()
+      await server.close()
+    }
+  })
+
+  it('fails closed for HTTP and WebSocket when explicit remote authorization is required', async () => {
+    const mountedApp = await mounted({
+      trustedHosts: ['harness.example'],
+      requireRemoteAuthorization: true,
+    })
+    const server = await serveWithUpgrades(mountedApp.routes, mountedApp.upgrades)
+    const headers = {
+      host: 'harness.example',
+      origin: 'http://harness.example',
+      'sec-fetch-site': 'same-origin',
+    }
+    try {
+      expect(await call(server.port, 'session.list', 'harness.example')).toBe(403)
+      expect(await webSocketStatus(server.port, MUX_EVENTS_PATH, headers)).toBe(403)
+
+      const removeAllow = mountedApp.ctx.on('remote-web-ui/authorize-http', () => 'allow')
+      expect(await call(server.port, 'session.list', 'harness.example')).toBe(404)
+      expect(await webSocketStatus(server.port, HOST_EVENTS_PATH, headers)).toBe(101)
+
+      removeAllow()
+      expect(await call(server.port, 'session.list', 'harness.example')).toBe(403)
+      expect(await webSocketStatus(server.port, MUX_EVENTS_PATH, headers)).toBe(403)
+    } finally {
+      await mountedApp.dispose()
+      await server.close()
+    }
+  })
+
+  it('closes an existing paired downlink after revocation without touching loopback', async () => {
+    const mountedApp = await mounted({
+      trustedHosts: ['harness.example'],
+      requireRemoteAuthorization: true,
+    })
+    let authorized = true
+    mountedApp.ctx.on('remote-web-ui/authorize-http', () => authorized ? 'allow' : 'deny')
+    const server = await serveWithUpgrades(mountedApp.routes, mountedApp.upgrades)
+    let remote: WebSocket | undefined
+    let local: WebSocket | undefined
+    try {
+      remote = await openWebSocket(server.port, MUX_EVENTS_PATH, {
+        host: 'harness.example',
+        origin: 'http://harness.example',
+        'sec-fetch-site': 'same-origin',
+        cookie: 'dsh_pair=paired-device',
+      })
+      local = await openWebSocket(server.port, HOST_EVENTS_PATH)
+      const remoteClosed = once(remote, 'close')
+      authorized = false
+      mountedApp.ctx.emit('remote-web-ui/authorization-changed')
+      await remoteClosed
+      expect(remote.readyState).toBe(WebSocket.CLOSED)
+      expect(local.readyState).toBe(WebSocket.OPEN)
+    } finally {
+      if (remote?.readyState === WebSocket.OPEN) remote.terminate()
+      if (local?.readyState === WebSocket.OPEN) {
+        const localClosed = once(local, 'close')
+        local.close()
+        await localClosed
+      }
+      await mountedApp.dispose()
+      await server.close()
+    }
+  })
+
+  it('closes existing downlinks when the connection plugin stops', async () => {
+    const mountedApp = await mounted({ requireRemoteAuthorization: true })
+    mountedApp.ctx.on('remote-web-ui/authorize-http', () => 'allow')
+    const server = await serveWithUpgrades(mountedApp.routes, mountedApp.upgrades)
+    let socket: WebSocket | undefined
+    let disposed = false
+    try {
+      socket = await openWebSocket(server.port, HOST_EVENTS_PATH, {
+        host: 'fresh.trycloudflare.com',
+        origin: 'https://fresh.trycloudflare.com',
+        'sec-fetch-site': 'same-origin',
+        cookie: 'dsh_pair=paired-device',
+      })
+      const closed = once(socket, 'close')
+      await mountedApp.dispose()
+      disposed = true
+      await closed
+      expect(socket.readyState).toBe(WebSocket.CLOSED)
+    } finally {
+      if (socket?.readyState === WebSocket.OPEN) socket.terminate()
+      if (!disposed) await mountedApp.dispose()
+      await server.close()
+    }
+  })
+
+  it('keeps arbitrary workspace roots local while paired clients use registered workspaces', async () => {
+    const mountedApp = await mounted({ trustedHosts: ['harness.example'] })
+    mountedApp.ctx.on('remote-web-ui/authorize-http', () => 'allow')
+    const connection = mountedApp.ctx.get('connection') as HostConnectionHandle
+    const calls: unknown[] = []
+    const remove = connection.rpc.intercept(
+      API_PATH,
+      endpoint => endpoint === 'workspace.create' || endpoint === 'session.create' || endpoint === 'session.list',
+      async (endpoint, payload) => {
+        calls.push({ endpoint, payload })
+        return { ok: true, value: null }
+      },
+      { authority: 'trusted-host' },
+    )
+    const server = await serve(mountedApp.routes)
+    try {
+      expect(await callRpc(server.port, 'workspace.create', 'harness.example', { path: '/private' })).toBe(403)
+      expect(await call(server.port, 'host.listDirectory', 'harness.example')).toBe(403)
+      expect(await call(server.port, 'host.createDirectory', 'harness.example')).toBe(403)
+      expect(await callRpc(server.port, 'session.create', 'harness.example', { cwd: '/private' })).toBe(403)
+
+      expect(await callRpc(server.port, 'session.create', 'harness.example', { workspaceId: 'known' })).toBe(200)
+      expect(await callRpc(server.port, 'session.list', 'harness.example', {})).toBe(200)
+      expect(await callRpc(
+        server.port,
+        'workspace.create',
+        `127.0.0.1:${String(server.port)}`,
+        { path: '/tmp/local' },
+      )).toBe(200)
+      expect(calls).toEqual([
+        { endpoint: 'session.create', payload: { workspaceId: 'known' } },
+        { endpoint: 'session.list', payload: {} },
+        { endpoint: 'workspace.create', payload: { path: '/tmp/local' } },
+      ])
+    } finally {
+      await remove()
+      await server.close()
+      await mountedApp.dispose()
+    }
+  })
+
   it('answers a declared LAN authority with 403 on every configuration method, over real HTTP', async () => {
     // The fence's input is a real IncomingMessage parsed by Node from the
     // wire, not a hand-assembled object: the Host header a LAN browser sends
     // is exactly what decides loopback-only here, so the boundary is asserted
     // against the parse the server actually performs.
-    const { routes, dispose } = await mounted({ trustedHosts: ['harness.example'] })
+    const { ctx, routes, dispose } = await mounted({ trustedHosts: ['harness.example'] })
+    ctx.on('remote-web-ui/authorize-http', () => 'allow')
     const { port, close } = await serve(routes)
     try {
       // Reads are as privileged as writes: describe returns the exposed

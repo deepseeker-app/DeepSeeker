@@ -1,0 +1,105 @@
+diff --git a/lib/index.js b/lib/index.js
+index 9f505168dc0ef457d826475416764fa1b8f0c7ac..36d6a09c12619d3a44c7524050eff79ecddb95fa 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -66,9 +66,11 @@ function resolveSkinsDir(fromUrl = import.meta.url) {
+ 	const fromEnv = process.env.DSH_SKINS_DIR;
+ 	if (fromEnv !== void 0 && fromEnv !== "") return fromEnv;
+ 	const here = fileURLToPath(fromUrl);
++	const dshHome = process.env.DSH_HOME !== void 0 && process.env.DSH_HOME !== "" ? process.env.DSH_HOME : join(homedir(), ".dsh");
+ 	const candidates = [
+ 		fileURLToPath(new URL("../../", fromUrl)),
+ 		findScopedAnchor(dirname(here)),
++		join(dshHome, "profiles", "node_modules", "@linxin666"),
+ 		fileURLToPath(new URL("../../../skins/", fromUrl))
+ 	].filter((candidate) => candidate !== null);
+ 	for (const candidate of candidates) if (listSkinDirCandidates(candidate).length > 0) return candidate;
+@@ -497,35 +499,35 @@ function requireMethod(req, res, method) {
+ 	});
+ 	return false;
+ }
+-/**
+-* Same-origin fence. Browsers send `Sec-Fetch-Site` on every fetch: same-site
+-* and cross-site pages both resolve their `Origin` here, so the checks are:
+-* a `cross-site` fetch is always rejected, and an `Origin` that does not
+-* match the request `Host` is rejected. Requests without either header
+-* (curl, node http, old browsers) pass — this is a local single-user tool,
+-* and the fence only targets the cross-site browser vector.
+-*/
+-function isSameOriginRequest(req) {
+-	const site = req.headers["sec-fetch-site"];
+-	if (typeof site === "string" && site === "cross-site") return false;
+-	const origin = req.headers.origin;
+-	if (typeof origin === "string" && origin !== "" && origin !== "null") {
+-		const host = req.headers.host;
+-		if (typeof host !== "string" || host === "") return false;
+-		try {
+-			if (new URL(origin).host !== host) return false;
+-		} catch {
+-			return false;
+-		}
++/** Require a real loopback socket, loopback Host, and same-origin markers. */
++function requireLoopback(req, res) {
++	const address = req.socket.remoteAddress?.toLowerCase();
++	const octets = (address?.startsWith("::ffff:") === true ? address.slice(7) : address)?.split(".") ?? [];
++	const loopbackSocket = address === "::1" || octets.length === 4 && octets[0] === "127" && octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255);
++	const rawHost = req.headers.host;
++	let host;
++	try {
++		if (typeof rawHost !== "string") throw new Error("missing-host");
++		host = new URL(`http://${rawHost}`);
++	} catch {
++		json(res, 403, {
++			ok: false,
++			error: "loopback-request-required"
++		});
++		return false;
+ 	}
+-	return true;
+-}
+-/** Reject cross-site requests with 403. */
+-function requireSameOrigin(req, res) {
+-	if (isSameOriginRequest(req)) return true;
++	const hostOctets = host.hostname.split(".");
++	const loopbackHost = host.hostname === "localhost" || host.hostname === "[::1]" || hostOctets.length === 4 && hostOctets[0] === "127" && hostOctets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255);
++	let sameOrigin = req.headers["sec-fetch-site"] !== "cross-site";
++	if (sameOrigin && req.headers.origin !== void 0) try {
++		sameOrigin = new URL(req.headers.origin).host === host.host;
++	} catch {
++		sameOrigin = false;
++	}
++	if (loopbackSocket && loopbackHost && sameOrigin) return true;
+ 	json(res, 403, {
+ 		ok: false,
+-		error: "cross-site-request-rejected"
++		error: sameOrigin ? "loopback-request-required" : "cross-site-request-rejected"
+ 	});
+ 	return false;
+ }
+@@ -580,7 +582,7 @@ function getRoute(path, run) {
+ 		path,
+ 		handler: (req, res) => {
+ 			if (!requireMethod(req, res, "GET")) return;
+-			if (!requireSameOrigin(req, res)) return;
++			if (!requireLoopback(req, res)) return;
+ 			run().then((value) => json(res, 200, value), (error) => {
+ 				json(res, 500, {
+ 					ok: false,
+@@ -597,7 +599,7 @@ function postRoute(path, run) {
+ 		path,
+ 		handler: (req, res) => {
+ 			if (!requireMethod(req, res, "POST")) return Promise.resolve();
+-			if (!requireSameOrigin(req, res)) return Promise.resolve();
++			if (!requireLoopback(req, res)) return Promise.resolve();
+ 			return readJsonBody(req).then((body) => {
+ 				return run(typeof body === "object" && body !== null ? body : {}).then((value) => json(res, 200, value), (error) => {
+ 					json(res, 400, {
+@@ -663,7 +665,7 @@ function bundleRoute() {
+ 		path: prefix,
+ 		handler: (req, res) => {
+ 			if (!requireMethod(req, res, "GET")) return;
+-			if (!requireSameOrigin(req, res)) return;
++			if (!requireLoopback(req, res)) return;
+ 			let id;
+ 			try {
+ 				id = decodeURIComponent(new URL(req.url ?? "/", "http://x").pathname.slice(prefix.length + 1));

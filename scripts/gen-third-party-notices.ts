@@ -50,15 +50,18 @@ const FIRST_PARTY = new Set([
 export const CLAUDE_AGENT_SDK_PACKAGE = '@anthropic-ai/claude-agent-sdk'
 const CLAUDE_PLATFORM_PACKAGE_PREFIX = `${CLAUDE_AGENT_SDK_PACKAGE}-`
 const CLAUDE_PLATFORM_DECLARED_LICENSE = 'SEE LICENSE IN LICENSE.md'
+/** Website animation packages reviewed under Webflow's standard GSAP license. */
+export const GSAP_RUNTIME_PACKAGES = ['@gsap/react', 'gsap'] as const
+const GSAP_RUNTIME_PACKAGE_SET = new Set<string>(GSAP_RUNTIME_PACKAGES)
 
 /**
  * Whether a non-permissive runtime declaration has an identity-scoped owner
  * authorization. This does not reclassify its terms as permissive.
  * @param name - exact npm package identity.
- * @returns true only for the official Claude Agent SDK package.
+ * @returns true only for a reviewed, exact package identity.
  */
 export function isOwnerAuthorizedRuntime(name: string): boolean {
-  return name === CLAUDE_AGENT_SDK_PACKAGE
+  return name === CLAUDE_AGENT_SDK_PACKAGE || GSAP_RUNTIME_PACKAGE_SET.has(name)
 }
 
 /**
@@ -66,6 +69,9 @@ export function isOwnerAuthorizedRuntime(name: string): boolean {
  * Each entry documents why the store cannot answer.
  */
 const OVERRIDES: Record<string, { license?: string; repo?: string }> = {
+  // The published manifest says Apache-2.0 while the tarball also carries a
+  // BSD-3-Clause LICENSE. Record both sets of obligations conservatively.
+  '@linxin666/dsh-web-ui-all': { license: 'Apache-2.0 AND BSD-3-Clause' },
   // Rust workspaces publishing npm bins without `license` in package.json.
   'oxlint': { license: 'MIT', repo: 'https://github.com/oxc-project/oxc' },
   'oxlint-tsgolint': { license: 'MIT', repo: 'https://github.com/oxc-project/tsgolint' },
@@ -656,6 +662,17 @@ ${rows.join('\n')}
 `
 }
 
+function renderGsapAuthorization(runtimeDeps: ExternalDep[]): string {
+  const present = GSAP_RUNTIME_PACKAGES.filter(name => runtimeDeps.some(dep => dep.name === name))
+  if (present.length === 0) return ''
+
+  return `
+## GSAP website animation runtime
+
+The project owner authorizes the website to bundle ${present.map(name => `\`${name}\``).join(' and ')} under Webflow's [Standard "No Charge" GSAP License](https://gsap.com/community/standard-license/). The reviewed use is limited to entrance, scroll, and interaction motion on the DeepSeeker website. DeepSeeker does not provide a visual animation builder. This identity-scoped authorization does not classify the GSAP terms as permissive and covers no other package.
+`
+}
+
 /**
  * Render the complete notices document.
  * @returns the exact bytes `THIRD_PARTY_NOTICES.md` must hold.
@@ -715,6 +732,7 @@ pnpm applies local patches to the following packages at install time, so shipped
 
 ${patchedLines.join('\n')}
 ${renderClaudeDistribution(claudeDistribution)}
+${renderGsapAuthorization(runtimeDeps)}
 
 ## Development-only npm dependencies
 

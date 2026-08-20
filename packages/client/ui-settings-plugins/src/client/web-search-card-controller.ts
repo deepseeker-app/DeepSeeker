@@ -87,7 +87,7 @@ export class WebSearchCardController {
     this.form = new CardForm(
       scope,
       [textField('baseURL'), numberField('maxUses')],
-      [{ field: API_KEY_FIELD, write: text => this.writeKey(text) }],
+      [{ field: API_KEY_FIELD, write: (text, signal) => this.writeKey(text, signal) }],
     )
     this.store = this.form.bind(() => this.projection())
     scope.subscribe(() => { void this.readCredential() })
@@ -113,7 +113,7 @@ export class WebSearchCardController {
    * of order, so a response is published only while it still answers for the
    * reference in force.
    */
-  private async readCredential(): Promise<void> {
+  private async readCredential(signal?: AbortSignal): Promise<void> {
     const ref = refOf(this.scope.getSnapshot())
     if (ref !== this.credential.ref) {
       // A new reference knows nothing yet; keeping the old answer would claim
@@ -123,13 +123,15 @@ export class WebSearchCardController {
     }
     let response: Awaited<ReturnType<IApiClient['credentials']['describe']>>
     try {
-      response = await this.api.credentials.describe({ refs: [ref] })
+      response = signal === undefined
+        ? await this.api.credentials.describe({ refs: [ref] })
+        : await this.api.credentials.describe({ refs: [ref] }, signal)
     } catch (_credentialReadFailure) {
       // The card stays usable without this: the key control simply reports the
       // last state it knew, and a write still reaches the Host.
       return
     }
-    if (!response.result.ok || ref !== refOf(this.scope.getSnapshot())) return
+    if (!response.result.ok || signal?.aborted === true || ref !== refOf(this.scope.getSnapshot())) return
     const view = response.result.value.credentials[ref]
     const next: CredentialState = {
       ref,
@@ -167,16 +169,18 @@ export class WebSearchCardController {
   /**
    * Write the staged key, then re-read whether the Host now holds one.
    * @param value - the staged credential literal.
+   * @param signal - cancellation shared with the card's save deadline.
    * @returns whether the Host reports a configured credential afterwards.
    */
-  private async writeKey(value: string): Promise<boolean> {
+  private async writeKey(value: string, signal: AbortSignal): Promise<boolean> {
+    let response: Awaited<ReturnType<IApiClient['credentials']['set']>>
     try {
-      await this.api.credentials.set({ ref: refOf(this.scope.getSnapshot()), value })
+      response = await this.api.credentials.set({ ref: refOf(this.scope.getSnapshot()), value }, signal)
     } catch (_credentialWriteFailure) {
-      // Refusals surface through the re-read below: the Host is the only
-      // authority on whether the key now exists.
+      return false
     }
-    await this.readCredential()
+    if (!response.result.ok || signal.aborted) return false
+    await this.readCredential(signal)
     return this.credential.configured
   }
 }

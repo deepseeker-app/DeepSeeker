@@ -1,7 +1,8 @@
 /** Behavior of the /api browser-trust fence (rebinding + cross-site defense). */
 
 import { describe, expect, it } from 'vitest'
-import { assertTrustedAuthority, isTrustedApiRequest } from '../src/api-request-trust.ts'
+import type { IncomingMessage } from 'node:http'
+import { assertTrustedAuthority, isLoopbackApiRequest, isTrustedApiRequest } from '../src/api-request-trust.ts'
 
 function request(headers: Record<string, string | undefined>): { headers: Record<string, string | undefined> } {
   return { headers }
@@ -104,5 +105,32 @@ describe('isTrustedApiRequest', () => {
     expect(isTrustedApiRequest(request({ ...markers, host: 'bad host' }), [])).toBe(false)
     expect(isTrustedApiRequest(request({ ...markers, host: '127.0.0.999' }), [])).toBe(false)
     expect(isTrustedApiRequest(request({ ...markers, host: '128.0.0.1' }), [])).toBe(false)
+  })
+
+  it('requires a direct loopback request for the desktop shortcut', () => {
+    const incoming = (
+      host: string,
+      remoteAddress: string,
+      headers: Record<string, string> = {},
+    ): IncomingMessage => ({
+      headers: { host, ...headers },
+      socket: { remoteAddress },
+    } as unknown as IncomingMessage)
+    expect(isLoopbackApiRequest(incoming('127.0.0.1:3080', '127.0.0.1'))).toBe(true)
+    expect(isLoopbackApiRequest(incoming('localhost:3080', '::1'))).toBe(true)
+    expect(isLoopbackApiRequest(incoming('127.0.0.1:3080', '203.0.113.9'))).toBe(false)
+    expect(isLoopbackApiRequest(incoming('fresh.trycloudflare.com', '127.0.0.1'))).toBe(false)
+    expect(isLoopbackApiRequest(incoming('127.0.0.1:3080', '127.0.0.1', {
+      'cf-connecting-ip': '203.0.113.9',
+    }))).toBe(false)
+    expect(isLoopbackApiRequest(incoming('127.0.0.1:3080', '127.0.0.1', {
+      'x-forwarded-for': '203.0.113.9',
+    }))).toBe(false)
+    expect(isLoopbackApiRequest(incoming('127.0.0.1:3080', '127.0.0.1', {
+      forwarded: 'for=203.0.113.9',
+    }))).toBe(false)
+    expect(isLoopbackApiRequest(incoming('127.0.0.1:3080', '127.0.0.1', {
+      'x-real-ip': '203.0.113.9',
+    }))).toBe(false)
   })
 })

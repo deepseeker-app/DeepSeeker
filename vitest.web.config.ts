@@ -27,6 +27,9 @@ export default defineConfig({
       'apps/web/tests/**/*.e2e.ts',
       'apps/web/tests/**/*.snapshot.ts',
     ],
+    // External macOS volumes can materialize AppleDouble metadata beside a
+    // test file. Finder metadata is never executable source.
+    exclude: ['**/._*'],
     // Browser boot + real-model turns are slow; files share one browser, run serial.
     testTimeout: 180_000,
     hookTimeout: 120_000,

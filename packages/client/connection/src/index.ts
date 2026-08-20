@@ -1,13 +1,21 @@
 /** Host HTTP bridge for browser-client RPC. */
+import type { IncomingMessage } from 'node:http'
+import type { Duplex } from 'node:stream'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-attachment'
 // Activates the webServer Context merge used below.
-import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
+import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { toFetchHandler } from '@deepseek-ai/dsh-host-apiproxy'
+import { clientRequestSchema } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { API_PATH, HOST_EVENTS_PATH, MUX_EVENTS_PATH } from './api-path.ts'
-import { bridge, DEFAULT_MAX_REQUEST_BODY_BYTES } from './http-bridge.ts'
-import { assertTrustedAuthority, isTrustedApiRequest } from './api-request-trust.ts'
+import { bridge, DEFAULT_MAX_REQUEST_BODY_BYTES, type FetchHandler } from './http-bridge.ts'
+import {
+  assertTrustedAuthority,
+  hasSameOriginBrowserMarkers,
+  isLoopbackApiRequest,
+  isTrustedApiRequest,
+} from './api-request-trust.ts'
 import { HostConnectionService } from './rpc-host.ts'
 import { rejectWebSocketUpgrade, WebSocketDownlinks } from './websocket-downlink.ts'
 
@@ -25,6 +33,19 @@ export { API_PATH, HOST_EVENTS_PATH, MUX_EVENTS_PATH } from './api-path.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'client-connection'
+
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    /**
+     * Optional authenticated request decision supplied by remote-web-ui.
+     * @mode bail
+     * @param request - original Node HTTP request, including the paired-device cookie.
+     */
+    'remote-web-ui/authorize-http'(request: IncomingMessage): 'allow' | 'deny' | undefined
+    /** Broadcast after paired-device authorization state changes. */
+    'remote-web-ui/authorization-changed'(): void
+  }
+}
 
 /** Headroom for RPC JSON fields around aggregate base64 image payloads. */
 const REQUEST_ENVELOPE_HEADROOM_BYTES = 1024 * 1024
@@ -57,19 +78,27 @@ export interface ConnectionConfig {
    * that is not a bare, canonical authority fails the plugin load.
    */
   trustedHosts?: string[]
+  /**
+   * Require an explicit `remote-web-ui/authorize-http` decision for every
+   * non-loopback HTTP request and WebSocket upgrade.
+   */
+  requireRemoteAuthorization?: boolean
   /** Maximum buffered JSON body for every `/api` request. */
   maxRequestBodyBytes?: number
 }
 
 export const Config: z<ConnectionConfig> = z.object({
   trustedHosts: z.array(String).default([]),
+  requireRemoteAuthorization: z.boolean().default(false),
   maxRequestBodyBytes: z.natural().min(1).default(DEFAULT_MAX_REQUEST_BODY_BYTES),
 })
 
 /**
- * Methods gated to loopback even on a trusted-host deployment. Native dialogs
- * act on the host machine; the settings and credential domains mutate the
- * user's configuration and secret store, and READING them is equally
+ * Methods gated to loopback even on a trusted-host deployment. Directory
+ * browsing, directory creation, and workspace creation can select arbitrary
+ * host filesystem roots; native dialogs act on the host machine. The settings
+ * and credential domains mutate the user's configuration and secret store,
+ * and READING them is equally
  * privileged — `settings.describe` returns every exposed namespace's
  * configuration and `credentials.describe` reports whether an arbitrary
  * environment-variable name is configured and where from, which is
@@ -106,7 +135,10 @@ const PRIVILEGED_METHODS = new Set([
   'agentPreset.openDocument',
   'agentPreset.remove',
   'host.pickDirectory',
+  'host.listDirectory',
+  'host.createDirectory',
   'host.openPath',
+  'workspace.create',
   'settings.describe',
   'settings.openDocument',
   'settings.update',
@@ -130,6 +162,7 @@ const PRIVILEGED_METHODS = new Set([
 export function apply(ctx: Context, config?: ConnectionConfig): void {
   // The Loader resolves schema defaults; hand-built test contexts may pass none.
   const trustedHosts = config?.trustedHosts ?? []
+  const requireRemoteAuthorization = config?.requireRemoteAuthorization ?? false
   const maxRequestBodyBytes = config?.maxRequestBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES
   // Config boundary: a malformed entry fails the load loudly here rather than
   // silently authorizing its hostname prefix at request time.
@@ -139,14 +172,6 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
   const fetchHandler = connection.createSharedFetchHandler(API_PATH, {
     async fetch(request) {
       const pathname = new URL(request.url).pathname
-      const method = pathname.startsWith(`${API_PATH}/`)
-        ? pathname.slice(API_PATH.length + 1)
-        : undefined
-      if (method !== undefined
-        && PRIVILEGED_METHODS.has(method)
-        && !isTrustedApiRequest(request, [])) {
-        return new Response('forbidden', { status: 403 })
-      }
       if (request.method === 'GET' && (pathname === MUX_EVENTS_PATH || pathname === HOST_EVENTS_PATH)) {
         return new Response('upgrade required', {
           status: 426,
@@ -158,39 +183,150 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
       return toFetchHandler(apiProxy).fetch(request)
     },
   })
+  const remoteFetchHandler = restrictRemoteWorkspaceRoots(fetchHandler)
   const route: WebRoute = {
     kind: 'prefix',
     path: API_PATH,
     handler: async (req, res) => {
-      if (!isTrustedApiRequest(req, trustedHosts)) {
+      if (!isAuthorizedApiRequest(ctx, req, trustedHosts, requireRemoteAuthorization)) {
         res.writeHead(403)
         res.end('forbidden')
         return
       }
-      await bridge(req, res, fetchHandler, maxRequestBodyBytes)
+      const loopback = isLoopbackApiRequest(req)
+      const method = apiMethod(req.url)
+      if (!loopback
+        && ((method !== undefined && PRIVILEGED_METHODS.has(method))
+          || connection.requiresLoopbackAuthority(API_PATH, method))) {
+        res.writeHead(403)
+        res.end('forbidden')
+        return
+      }
+      await bridge(req, res, loopback ? fetchHandler : remoteFetchHandler, maxRequestBodyBytes)
     },
   }
   ctx.effect(() => ctx.webServer.register(route), 'client-connection: /api route')
   ctx.inject(['apiProxy'], (apiCtx) => {
     assertImageBodyCapacity(apiCtx, maxRequestBodyBytes)
     const downlinks = new WebSocketDownlinks(apiCtx.apiProxy)
+    const remoteDownlinks = new Map<Duplex, IncomingMessage>()
+    const recheckRemoteDownlink = (socket: Duplex, request: IncomingMessage): boolean => {
+      let authorized = false
+      try {
+        authorized = isAuthorizedApiRequest(ctx, request, trustedHosts, requireRemoteAuthorization)
+      } catch {
+        // A failing live authorizer must not leave a remote event stream open.
+      }
+      if (authorized) return true
+      remoteDownlinks.delete(socket)
+      socket.destroy()
+      return false
+    }
+    const recheckRemoteDownlinks = (): void => {
+      for (const [socket, request] of remoteDownlinks) {
+        if (socket.destroyed) remoteDownlinks.delete(socket)
+        else recheckRemoteDownlink(socket, request)
+      }
+    }
     const registerDownlink = (
       path: string,
-      handle: WebUpgradeRoute['handler'],
+      handle: (req: IncomingMessage, socket: Duplex, head: Buffer) => void,
     ): void => {
       apiCtx.effect(() => apiCtx.webServer.registerUpgrade({
         path,
         handler: (req, socket, head) => {
-          if (!isTrustedApiRequest(req, trustedHosts)) {
+          if (!isAuthorizedApiRequest(ctx, req, trustedHosts, requireRemoteAuthorization)) {
             rejectWebSocketUpgrade(socket)
             return
           }
-          return handle(req, socket, head)
+          if (isLoopbackApiRequest(req)) {
+            handle(req, socket, head)
+            return
+          }
+          const forget = (): void => { remoteDownlinks.delete(socket) }
+          remoteDownlinks.set(socket, req)
+          socket.once('close', forget)
+          if (!recheckRemoteDownlink(socket, req)) {
+            socket.off('close', forget)
+            return
+          }
+          try {
+            handle(req, socket, head)
+          } catch (error) {
+            socket.off('close', forget)
+            forget()
+            throw error
+          }
         },
       }), `client-connection: ${path} WebSocket`)
     }
+    apiCtx.effect(
+      () => apiCtx.on('remote-web-ui/authorization-changed', recheckRemoteDownlinks),
+      'client-connection: remote WebSocket authorization',
+    )
     apiCtx.effect(() => () => downlinks.close(), 'client-connection: WebSocket downlinks')
     registerDownlink(MUX_EVENTS_PATH, (req, socket, head) => { downlinks.handleMux(req, socket, head) })
     registerDownlink(HOST_EVENTS_PATH, (req, socket, head) => { downlinks.handleHost(req, socket, head) })
   })
+}
+
+function isAuthorizedApiRequest(
+  ctx: Context,
+  request: IncomingMessage,
+  trustedHosts: readonly string[],
+  requireRemoteAuthorization: boolean,
+): boolean {
+  // Cloudflare Tunnel originates from a loopback socket too, so both socket
+  // and Host are required before the desktop shortcut applies.
+  if (isLoopbackApiRequest(request)) return true
+  if (!hasSameOriginBrowserMarkers(request)) return false
+  const paired = ctx.bail(ctx, 'remote-web-ui/authorize-http', request)
+  if (paired !== undefined) return paired === 'allow'
+  if (requireRemoteAuthorization) return false
+
+  // Preserve legacy trusted-host deployments when no authenticated remote
+  // authorizer is mounted. A remote peer spoofing a loopback Host is excluded:
+  // real loopback was already accepted above, and `isTrustedApiRequest(req, [])`
+  // identifies the Host-only shortcut that must not be used here.
+  return isTrustedApiRequest(request, trustedHosts)
+    && !isTrustedApiRequest(request, [])
+}
+
+/** Extract one unary endpoint name from a Node request URL. */
+function apiMethod(url: string | undefined): string | undefined {
+  if (url === undefined) return undefined
+  const pathname = new URL(url, 'http://dsh.internal').pathname
+  return pathname.startsWith(`${API_PATH}/`) ? pathname.slice(API_PATH.length + 1) : undefined
+}
+
+/** Keep paired clients on registered workspaces instead of caller-chosen roots. */
+function restrictRemoteWorkspaceRoots(delegate: FetchHandler): FetchHandler {
+  return {
+    async fetch(request): Promise<Response> {
+      const pathname = new URL(request.url).pathname
+      if (request.method !== 'POST' || pathname !== `${API_PATH}/session.create`) {
+        return delegate.fetch(request)
+      }
+
+      let body: unknown
+      try {
+        body = await request.clone().json()
+      } catch {
+        return delegate.fetch(request)
+      }
+      const envelope = clientRequestSchema.safeParse(body)
+      if (envelope.success
+        && envelope.data.method === 'session.create'
+        && hasOwnCwd(envelope.data.payload)) {
+        return new Response('forbidden', { status: 403 })
+      }
+      return delegate.fetch(request)
+    },
+  }
+}
+
+function hasOwnCwd(payload: unknown): boolean {
+  return payload !== null
+    && typeof payload === 'object'
+    && Object.prototype.hasOwnProperty.call(payload, 'cwd')
 }

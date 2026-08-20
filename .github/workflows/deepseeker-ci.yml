@@ -1,0 +1,82 @@
+name: DeepSeeker CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deepseeker-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      DSH_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 11.7.0
+          run_install: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Reject local patch residue
+        run: |
+          git ls-files | rg '(^|/)\._|(^|/)dist/|^\.patch-work/'
+          if ($LASTEXITCODE -eq 0) {
+            exit 1
+          }
+          if ($LASTEXITCODE -ne 1) {
+            throw 'Failed to scan tracked paths'
+          }
+          rg -n '/(Volumes|Users|private|var/folders)/|\.pnpm_patches|^old mode |^new mode ' patches --glob '@linxin666__*.patch'
+          if ($LASTEXITCODE -eq 0) {
+            exit 1
+          }
+          if ($LASTEXITCODE -ne 1) {
+            throw 'Failed to scan dependency patches'
+          }
+
+      - name: Run static repository gates
+        run: pnpm run check:ci:static
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Run full unit suite
+        run: pnpm run test
+
+      - name: Run GUI regressions
+        run: pnpm run test:gui
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Build and run browser replay tests
+        env:
+          DSH_SNAPSHOT: replay
+        run: pnpm run test:web
+
+      - name: Build product website
+        run: pnpm --filter @deepseeker/site run build

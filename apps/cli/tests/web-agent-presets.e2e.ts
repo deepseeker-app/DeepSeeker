@@ -77,6 +77,19 @@ async function bootWeb(
     // and the URL prompt line — surface glue, not anything that decides an
     // agent's capabilities, which is all this file asserts.
     { id: 'web-runtime', disabled: true },
+    // These rows likewise own browser-facing Host routes and declare
+    // `webServer` as a hard dependency. This test deliberately runs without a
+    // bound server, so keep the UI/Host surfaces out while leaving the SSH and
+    // describe-image `surface: agent` preset rows live below. Their Host routes
+    // are covered by the bundle/security suites; this file owns tool scoping.
+    { id: 'ui-deepseek-balance', disabled: true },
+    { id: 'ui-web-ui-settings', disabled: true },
+    { id: 'ui-dsh-aionui-panel', disabled: true },
+    { id: 'ui-task-board', disabled: true },
+    { id: 'ui-git-graph', disabled: true },
+    { id: 'pet', disabled: true },
+    { id: 'remote-web-ui', disabled: true },
+    { id: 'ui-skin-center', disabled: true },
     { id: 'session-telemetry-otel', disabled: true },
     // A deployment-level skill on the host registry's GLOBAL layer — the same
     // registration shape a repository plugin's skill root uses. The layered
@@ -204,8 +217,9 @@ describe('the shipped Web composition', () => {
       // excluded for the reason the TUI composition e2e excludes them — they
       // depend on ripgrep being present on the machine.
       expect(toolNames(ctx, handle.agent).filter(name => name !== 'glob' && name !== 'grep')).toEqual([
-        'ask_user_question', 'bash', 'create_goal', 'edit', 'exit_plan_mode',
+        'ask_user_question', 'bash', 'create_goal', 'describe_image', 'edit', 'exit_plan_mode',
         'get_goal', 'interrupt_agent', 'job_kill', 'job_list', 'job_output', 'list_agents', 'ralph', 'read', 'read_image', 'send_message', 'skill',
+        'ssh_cluster', 'ssh_download', 'ssh_exec', 'ssh_list', 'ssh_tunnel', 'ssh_upload',
         'subagent', 'subagent_fork', 'todo_write', 'update_goal', 'web_search',
         'workflow', 'write',
       ])

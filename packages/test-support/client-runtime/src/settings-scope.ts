@@ -1,5 +1,5 @@
 /** Test double for the client settings-scope seam. */
-import { vi } from 'vitest'
+import { vi, type Mock } from 'vitest'
 import type { SettingsScope, SettingsScopeSnapshot } from '@deepseek-ai/dsh-client-runtime/client'
 
 /** Handle over one stubbed scope: the scope, its write spy, and publication controls. */
@@ -7,9 +7,9 @@ export interface StubSettingsScope<T> {
   /** The scope face handed to the service under test. */
   scope: SettingsScope<T>
   /** Spy behind `scope.set`; resolves immediately. */
-  set: ReturnType<typeof vi.fn>
+  set: Mock<SettingsScope<T>['set']>
   /** Spy behind `scope.unset`; resolves immediately. */
-  unset: ReturnType<typeof vi.fn>
+  unset: Mock<SettingsScope<T>['unset']>
   /** @returns how many listeners are currently subscribed (disposal assertions). */
   listenerCount(): number
   /**
@@ -31,8 +31,8 @@ export function stubSettingsScope<T>(): StubSettingsScope<T> {
     revision: undefined, writable: false, mode: 'host',
   }
   const listeners = new Set<() => void>()
-  const set = vi.fn(() => Promise.resolve())
-  const unset = vi.fn(() => Promise.resolve())
+  const set = vi.fn<SettingsScope<T>['set']>(() => Promise.resolve())
+  const unset = vi.fn<SettingsScope<T>['unset']>(() => Promise.resolve())
   return {
     scope: {
       getSnapshot: () => snapshot,

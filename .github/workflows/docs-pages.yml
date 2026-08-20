@@ -29,6 +29,9 @@ env:
 
 jobs:
   build:
+    # The DeepSeeker fork publishes apps/site through deepseeker-pages.yml.
+    # Keep an accidental manual docs run from replacing the product website.
+    if: github.repository == 'deepseek-ai/deepseek-harness'
     runs-on: ubuntu-latest
     permissions:
       contents: read

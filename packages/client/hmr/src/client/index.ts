@@ -65,6 +65,10 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Entry, Loader } from '@deepseek-ai/cordis-plugin-loader'
 import type { PluginsEventFrame } from '../events.ts'
 import { EVENTS_ENDPOINT } from '../events.ts'
+import {
+  subscribeSharedEventSource,
+  type SharedEventSourceOptions,
+} from './shared-event-source.ts'
 
 export type { PluginsEventFrame } from '../events.ts'
 export { EVENTS_ENDPOINT } from '../events.ts'
@@ -74,6 +78,18 @@ export const name = 'client-hmr'
 
 /** Required services: the vendored Loader (entry governance) and the client module system (boot provide, service name `modules`). */
 export const inject = ['loader', 'modules']
+
+/** Cross-tab SSE coordinator consumed by client plugins with independent streams. */
+export interface SharedEventSourceService {
+  /** Subscribe to one same-origin SSE resource and share its owner connection across tabs. */
+  subscribe(options: SharedEventSourceOptions): () => void
+}
+
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    sharedEventSource: SharedEventSourceService
+  }
+}
 
 /** Find the loader entry whose module specifier is `id` (entry tree ids are random; the package name lives in `options.name`). */
 function findEntry(loader: Loader, id: string): Entry | undefined {
@@ -100,6 +116,8 @@ export function apply(ctx: Context): void {
   // client module loader package, `loader` from the vendored Loader).
   const modLoader = ctx.modules
   const loader: Loader = ctx.loader
+  const sharedEventSource: SharedEventSourceService = { subscribe: subscribeSharedEventSource }
+  ctx.provide('sharedEventSource', sharedEventSource)
 
   async function reload(id: string): Promise<void> {
     const entry = findEntry(loader, id)
@@ -163,19 +181,23 @@ export function apply(ctx: Context): void {
     }
   }
 
-  ctx.effect(() => {
-    const source = new EventSource(EVENTS_ENDPOINT)
-    source.addEventListener('message', (event: MessageEvent<string>) => {
+  ctx.effect(() => sharedEventSource.subscribe({
+    url: EVENTS_ENDPOINT,
+    key: 'plugins',
+    onMessage: (data) => {
       let frame: PluginsEventFrame
       try {
-        frame = JSON.parse(event.data) as PluginsEventFrame
+        frame = JSON.parse(data) as PluginsEventFrame
       } catch {
         // Wire boundary: a malformed dev-channel frame is dropped loudly.
-        ctx.logger.warn(`client-hmr: unparseable event frame: ${event.data}`)
+        ctx.logger.warn(`client-hmr: unparseable event frame: ${data}`)
         return
       }
       handle(frame)
-    })
-    return () => { source.close() }
-  }, 'client-hmr: event source')
+    },
+    onCoordinationError: (error) => {
+      ctx.logger.warn('client-hmr: cross-tab event-source coordination failed; using a local stream')
+      ctx.logger.warn(error)
+    },
+  }), 'client-hmr: shared event source')
 }

@@ -4,6 +4,8 @@
 - button "New session":
   - img
   - text: New Session
+- button "任务看板"
+- button "SSH"
 - text: Workspaces
 - button "Search sessions":
   - img
@@ -17,6 +19,17 @@
     - img
     - text: workspace
   - treeitem "New Session" [selected]
+- button "Check for updates":
+  - img
+- button "Mobile remote control"
+- region "DeepSeek balance":
+  - text: DeepSeek balance
+  - paragraph: DeepSeek API Key is not configured
+  - button "Top up":
+    - img
+    - text: Top up
+  - button "Refresh":
+    - img
 - button "Settings":
   - img
   - text: Settings
@@ -29,6 +42,7 @@
   - img
   - text: Standard mode
   - img
+- button "插入图片引用，交给 describe_image 工具分析"
 - textbox "Describe what you want to build"
 - button "Commands":
   - img
@@ -41,3 +55,8 @@
 - text: Details
 - button "Close details"
 - text: Click a tool row in the message flow to view its details
+- button "文件"
+- button "变更"
+- button "收起面板"
+- textbox "按文件名搜索"
+- text: 项目为空

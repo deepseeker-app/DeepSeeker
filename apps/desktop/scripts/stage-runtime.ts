@@ -2,8 +2,9 @@
 
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { cp, lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
+import { cp, lstat, mkdir, readFile, readdir, realpath, rm, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const desktopRoot = resolve(import.meta.dirname, '..')
 const repositoryRoot = resolve(desktopRoot, '../..')
@@ -46,8 +47,12 @@ async function findSymlink(directory: string): Promise<string | undefined> {
   return undefined
 }
 
-async function materializeLinks(): Promise<void> {
-  const nodeModules = join(staging, 'node_modules')
+/**
+ * Replace dependency links with copied directories without following links during removal.
+ * @param nodeModules - Staged node_modules directory to materialize.
+ * @returns Completion after no dependency links remain.
+ */
+export async function materializeLinks(nodeModules: string): Promise<void> {
   for (let link = await findSymlink(nodeModules); link !== undefined; link = await findSymlink(nodeModules)) {
     const segments = link.slice(nodeModules.length + 1).split(sep)
     const bin = segments.lastIndexOf('.bin')
@@ -56,12 +61,28 @@ async function materializeLinks(): Promise<void> {
       continue
     }
     const source = await realpath(link)
-    await rm(link, { recursive: true, force: true })
+    await unlink(link)
     await cp(source, link, {
       recursive: true,
       dereference: true,
       filter: path => path !== join(source, 'node_modules') && !path.startsWith(join(source, 'node_modules') + sep),
     })
+  }
+}
+
+/**
+ * Remove macOS AppleDouble sidecars copied from an external-volume workspace.
+ * @param directory - Materialized runtime directory to clean recursively.
+ * @returns Completion after every sidecar below the directory is absent.
+ */
+export async function removeAppleDouble(directory: string): Promise<void> {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name)
+    if (entry.name.startsWith('._')) {
+      await rm(path, { recursive: true, force: true })
+      continue
+    }
+    if (entry.isDirectory()) await removeAppleDouble(path)
   }
 }
 
@@ -84,16 +105,31 @@ async function restoreLegacyHoists(): Promise<void> {
 
 async function deploy(): Promise<void> {
   const savedWorkspaceState = existsSync(workspaceState) ? await readFile(workspaceState) : undefined
+  const packageManager = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
+  const failures: unknown[] = []
   try {
-    await run(process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', [
+    await run(packageManager, [
       '--config.verify-deps-before-run=false', '--config.allow-unused-patches=true',
       '--filter', deployPackage, 'deploy', '--legacy', '--prod',
       '--config.node-linker=hoisted', '--config.auto-install-peers=false', '--config.link-workspace-packages=true', staging,
     ])
-  } finally {
+  } catch (cause) {
+    failures.push(cause)
+  }
+  try {
     if (savedWorkspaceState === undefined) await rm(workspaceState, { force: true })
     else await writeFile(workspaceState, savedWorkspaceState)
+  } catch (cause) {
+    failures.push(cause)
   }
+  try {
+    // Legacy deploy temporarily rewrites the active hoist layout; relink every source importer before returning.
+    await run(packageManager, ['install', '--frozen-lockfile'])
+  } catch (cause) {
+    failures.push(cause)
+  }
+  if (failures.length === 1) throw failures[0]
+  if (failures.length > 1) throw new AggregateError(failures, 'desktop runtime deploy or workspace restoration failed')
 }
 
 async function main(): Promise<void> {
@@ -104,10 +140,14 @@ async function main(): Promise<void> {
   await rm(staging, { recursive: true, force: true })
   await deploy()
   await restoreLegacyHoists()
-  await materializeLinks()
+  await materializeLinks(join(staging, 'node_modules'))
+  await removeAppleDouble(staging)
   if (!existsSync(entry)) throw new Error(`desktop Host entry missing after staging: ${entry}`)
   if (!existsSync(frontend)) throw new Error(`desktop Web frontend missing after staging: ${frontend}`)
   console.log(`desktop runtime staged at ${staging}`)
 }
 
-await main()
+const invokedPath = process.argv[1]
+if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.meta.url)) {
+  await main()
+}

@@ -1,6 +1,16 @@
-/** Build an unsigned desktop artifact without writing an app bundle to an external volume. */
+/** Build a local desktop artifact without writing an app bundle to an external volume. */
 
-import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import {
+  copyFileSync,
+  createReadStream,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -24,8 +34,19 @@ function findMacApp(outputRoot: string): string {
   throw new Error(`Electron Builder did not produce a macOS app under ${outputRoot}`)
 }
 
-/** Build the current platform package, using internal temporary storage for macOS app assembly. */
-export function packageDesktop(): void {
+async function sha256File(filename: string): Promise<string> {
+  const digest = createHash('sha256')
+  await new Promise<void>((resolvePromise, rejectPromise) => {
+    const stream = createReadStream(filename)
+    stream.on('data', chunk => digest.update(chunk))
+    stream.once('error', rejectPromise)
+    stream.once('end', resolvePromise)
+  })
+  return digest.digest('hex')
+}
+
+/** Build the current platform package, including a verified ad-hoc signature on macOS. */
+export async function packageDesktop(): Promise<void> {
   const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
   if (process.platform !== 'darwin') {
     run('pnpm', ['exec', 'electron-builder', '--dir'], desktopRoot)
@@ -38,21 +59,31 @@ export function packageDesktop(): void {
   const artifactName = `DeepSeeker-mac-${process.arch}.zip`
   const temporaryArchive = join(temporaryRoot, artifactName)
   const artifactPath = join(artifactDirectory, artifactName)
+  const checksumPath = `${artifactPath}.sha256`
 
   try {
+    mkdirSync(artifactDirectory, { recursive: true })
+    rmSync(artifactPath, { force: true })
+    rmSync(checksumPath, { force: true })
     mkdirSync(builderOutput)
     run('pnpm', [
       'exec', 'electron-builder', '--dir',
       `--config.directories.output=${builderOutput}`,
+      '--config.mac.identity=null',
+      '--config.mac.notarize=false',
     ], desktopRoot)
     const appPath = findMacApp(builderOutput)
+    run('codesign', ['--force', '--deep', '--sign', '-', '--timestamp=none', appPath], desktopRoot)
+    run('codesign', ['--verify', '--deep', '--strict', '--verbose=2', appPath], desktopRoot)
     run('ditto', ['-c', '-k', '--norsrc', '--keepParent', appPath, temporaryArchive], desktopRoot)
     run('unzip', ['-tq', temporaryArchive], desktopRoot)
-    mkdirSync(artifactDirectory, { recursive: true })
-    rmSync(artifactPath, { force: true })
     copyFileSync(temporaryArchive, artifactPath)
+    const checksum = await sha256File(artifactPath)
+    writeFileSync(checksumPath, `${checksum}  ${artifactName}\n`, { encoding: 'ascii', mode: 0o600 })
     const megabytes = (statSync(artifactPath).size / 1_048_576).toFixed(1)
-    console.log(`Unsigned package ready: ${artifactPath} (${megabytes} MB, contains ${basename(appPath)})`)
+    console.log(
+      `Ad-hoc signed package ready: ${artifactPath} (${megabytes} MB, contains ${basename(appPath)}); checksum: ${checksumPath}`,
+    )
   } finally {
     rmSync(temporaryRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
   }
@@ -60,10 +91,8 @@ export function packageDesktop(): void {
 
 const invokedPath = process.argv[1]
 if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.meta.url)) {
-  try {
-    packageDesktop()
-  } catch (error) {
+  packageDesktop().catch((error: unknown) => {
     console.error(error instanceof Error ? error.message : String(error))
     process.exitCode = 1
-  }
+  })
 }

@@ -87,7 +87,7 @@ export function apply(ctx: ClientContext): void {
   })
   const welcomeController = new WelcomeNoticeStore(
     connection.api,
-    connection.isLoopback ? 'host' : 'memory',
+    connection.isLoopback ? 'host' : 'browser',
   )
   const welcomeInjected = (): WelcomeNoticeInjected => ({
     controller: welcomeController,

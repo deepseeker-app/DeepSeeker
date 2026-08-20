@@ -306,7 +306,10 @@ describe('web e2e: persisted subagent conversation and human continuation', () =
       name: `Expand ${ONE_SHOT_LABEL} descendants`,
     }).count()).toBe(0)
     const oneShotRow = page.getByRole('treeitem', { name: new RegExp(ONE_SHOT_LABEL) })
-    expect(await oneShotRow.getByText('~6mo 12d', { exact: true }).count()).toBe(1)
+    await expect.poll(
+      () => oneShotRow.getByText('~6mo 12d', { exact: true }).count(),
+      { timeout: 10_000 },
+    ).toBe(1)
     expect(await oneShotRow.getAttribute('aria-label')).toContain('192d 00h 00m 00s')
     await page.getByRole('button', { name: `Expand ${LABEL} descendants` }).click()
     const childRow = page.getByRole('treeitem', { name: new RegExp(LABEL) })

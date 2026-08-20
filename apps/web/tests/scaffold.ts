@@ -449,7 +449,20 @@ export async function launchWebScaffold(options: LaunchOptions = {}): Promise<We
     { id: 'web-runtime', config: { printUrl: false, surfaceContext } },
     ...options.remoteAuthority === undefined
       ? []
-      : [{ id: 'connection', config: { trustedHosts: [options.remoteAuthority] } }],
+      : [{
+        id: 'connection',
+        config: {
+          trustedHosts: [options.remoteAuthority],
+          requireRemoteAuthorization: true,
+        },
+      }, {
+        id: 'remote-web-ui',
+        config: {
+          enabled: true,
+          tunnelMode: 'manual',
+          publicBaseUrl: `http://${options.remoteAuthority}`,
+        },
+      }],
     { id: 'settings', config: { dshHome: harnessHome } },
     { id: 'credentials', config: { dshHome: harnessHome } },
     // The shipped directory-picker row is the -auto chooser, which resolves

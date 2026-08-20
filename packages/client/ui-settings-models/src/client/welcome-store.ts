@@ -14,6 +14,15 @@ export interface WelcomeNoticeState {
   error: string | null
 }
 
+/** Minimal browser storage face used by the remote acknowledgement path. */
+export interface WelcomeNoticeBrowserStorage {
+  getItem(key: string): string | null
+  setItem(key: string, value: string): void
+}
+
+/** Browser-local key; the value remains the owner copy version. */
+export const WELCOME_NOTICE_BROWSER_STORAGE_KEY = 'deepseeker.ui-onboarding.welcomeNoticeVersion'
+
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -24,7 +33,15 @@ function acknowledgementOf(view: SettingsNamespaceView): string | undefined {
   return typeof value === 'string' ? value : undefined
 }
 
-/** Coordinates durable Host acknowledgement or a process-local remote fallback. */
+function defaultBrowserStorage(): WelcomeNoticeBrowserStorage | undefined {
+  try {
+    return (globalThis as { localStorage?: WelcomeNoticeBrowserStorage }).localStorage
+  } catch {
+    return undefined
+  }
+}
+
+/** Coordinates durable Host acknowledgement or a browser-local remote acknowledgement. */
 export class WelcomeNoticeStore {
   /** uSES-safe state source shared by the registered welcome step. */
   readonly store: SnapshotStore<WelcomeNoticeState> = createSnapshotStore({
@@ -32,21 +49,40 @@ export class WelcomeNoticeStore {
   })
 
   private generation = 0
+  private readonly browserStorage: WelcomeNoticeBrowserStorage | undefined
 
   /**
    * @param api - settings wire face used for durable reads and writes.
-   * @param persistence - remote browsers use memory because settings is loopback-only.
+   * @param persistence - remote browsers use their own storage because Host settings are loopback-only.
+   * @param browserStorage - injectable browser storage for deterministic tests.
    */
   constructor(
     private readonly api: Pick<IApiClient, 'settings'>,
-    private readonly persistence: 'host' | 'memory' = 'host',
-  ) {}
+    private readonly persistence: 'host' | 'browser' = 'host',
+    browserStorage?: WelcomeNoticeBrowserStorage,
+  ) {
+    this.browserStorage = browserStorage ?? (persistence === 'browser' ? defaultBrowserStorage() : undefined)
+  }
 
-  /** Load the acknowledgement from Host settings or initialize process-local state. */
+  /** Load the acknowledgement from Host settings or this remote browser. */
   async load(): Promise<void> {
     const generation = ++this.generation
-    if (this.persistence === 'memory') {
-      this.store.update((state) => { state.status = 'ready'; state.error = null })
+    if (this.persistence === 'browser') {
+      try {
+        if (this.browserStorage === undefined) throw new Error('browser storage is unavailable')
+        const acknowledged = this.browserStorage.getItem(WELCOME_NOTICE_BROWSER_STORAGE_KEY) === WELCOME_NOTICE_VERSION
+        this.store.update((state) => {
+          state.status = 'ready'
+          state.acknowledged = acknowledged
+          state.error = null
+        })
+      } catch (error) {
+        this.store.update((state) => {
+          state.status = 'error'
+          state.acknowledged = false
+          state.error = messageOf(error)
+        })
+      }
       return
     }
     this.store.update((state) => { state.status = 'loading'; state.error = null })
@@ -74,18 +110,30 @@ export class WelcomeNoticeStore {
   }
 
   /**
-   * Persist this copy version, or advance only this process for a remote browser.
+   * Persist this copy version in Host settings or this remote browser.
    * @returns true when the selected persistence mode accepted the acknowledgement.
    */
   async acknowledge(): Promise<boolean> {
     const generation = ++this.generation
-    if (this.persistence === 'memory') {
-      this.store.update((state) => {
-        state.status = 'ready'
-        state.acknowledged = true
-        state.error = null
-      })
-      return true
+    if (this.persistence === 'browser') {
+      this.store.update((state) => { state.status = 'saving'; state.error = null })
+      try {
+        if (this.browserStorage === undefined) throw new Error('browser storage is unavailable')
+        this.browserStorage.setItem(WELCOME_NOTICE_BROWSER_STORAGE_KEY, WELCOME_NOTICE_VERSION)
+        this.store.update((state) => {
+          state.status = 'ready'
+          state.acknowledged = true
+          state.error = null
+        })
+        return true
+      } catch (error) {
+        this.store.update((state) => {
+          state.status = 'error'
+          state.acknowledged = false
+          state.error = messageOf(error)
+        })
+        return false
+      }
     }
     this.store.update((state) => { state.status = 'saving'; state.error = null })
     try {
@@ -116,8 +164,8 @@ export class WelcomeNoticeStore {
 }
 
 /**
- * Refresh only after welcome state has left idle. A memory-mode load retains
- * acknowledgement so reconnect does not reopen a process-local notice.
+ * Refresh only after welcome state has left idle. A browser-mode load retains
+ * acknowledgement across reconnects and reloads without opening Host settings.
  * @param controller - welcome state owner whose current status decides whether to load.
  */
 export function refreshWelcomeIfLoaded(controller: WelcomeNoticeStore): void {

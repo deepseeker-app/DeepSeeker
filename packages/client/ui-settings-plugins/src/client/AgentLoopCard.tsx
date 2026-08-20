@@ -37,7 +37,7 @@ export function AgentLoopCard(props: AgentLoopCardProps) {
         resetLabel={t('reset')}
         invalidLabel={t('invalidNumber')}
         numeric
-        disabled={!state.writable}
+        disabled={!state.writable || state.saving}
         {...state.maxParallelToolCalls}
         onEdit={(text) => { props.edit('maxParallelToolCalls', text) }}
         onReset={() => { props.resetField('maxParallelToolCalls') }}

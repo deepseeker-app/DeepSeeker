@@ -1,0 +1,443 @@
+diff --git a/lib/index.js b/lib/index.js
+index 39bf073a41a315c964c11781ebbbcc4498a11710..6859ca7705d9509f21d6eef67d1daa1b4267f1ee 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -140,7 +140,7 @@ function validateAttachPayload(payload, maxBytes) {
+ 		payload: {
+ 			data,
+ 			mediaType,
+-			name
++			...name === void 0 ? {} : { name }
+ 		},
+ 		bytes
+ 	};
+@@ -214,6 +214,57 @@ function json(res, envelope, status = 200) {
+ 	res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+ 	res.end(JSON.stringify(envelope));
+ }
++/** Whether a socket address belongs to the local loopback range. */
++function isLoopbackAddress(address) {
++	if (address === void 0) return false;
++	const normalized = address.toLowerCase();
++	if (normalized === "::1") return true;
++	const parts = (normalized.startsWith("::ffff:") ? normalized.slice(7) : normalized).split(".");
++	return parts.length === 4 && parts[0] === "127" && parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255);
++}
++/** Parse the request Host into the authority used for origin checks. */
++function requestHost(req) {
++	const host = req.headers.host;
++	if (typeof host !== "string") return void 0;
++	try {
++		return new URL(`http://${host}`);
++	} catch {
++		return;
++	}
++}
++/** Whether the Host authority itself names a local loopback endpoint. */
++function isLoopbackHostname(hostname) {
++	if (hostname === "localhost" || hostname === "[::1]") return true;
++	const parts = hostname.split(".");
++	return parts.length === 4 && parts[0] === "127" && parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255);
++}
++/** Headers that mark a loopback socket as the last proxy hop, not the client. */
++const PROXY_CLIENT_HEADERS = [
++	"cf-connecting-ip",
++	"x-forwarded-for",
++	"forwarded",
++	"x-real-ip"
++];
++/**
++* Authorize one attach/raw request before it can read a body or attachment.
++* A tunnel reaches the host over a loopback socket, so local trust requires
++* both a loopback socket and a loopback Host. Other requests delegate to the
++* remote-control plugin's live pairing-cookie check and fail closed when the
++* plugin is absent.
++*/
++function authorizeAttachRequest(ctx, req) {
++	if (req.headers["sec-fetch-site"] === "cross-site") return false;
++	const host = requestHost(req);
++	if (host === void 0) return false;
++	const origin = req.headers.origin;
++	if (origin !== void 0) try {
++		if (new URL(origin).host !== host.host) return false;
++	} catch {
++		return false;
++	}
++	if (!PROXY_CLIENT_HEADERS.some((name) => req.headers[name] !== void 0) && isLoopbackAddress(req.socket.remoteAddress) && isLoopbackHostname(host.hostname)) return true;
++	return ctx.bail(ctx, "remote-web-ui/authorize-http", req) === "allow";
++}
+ /**
+ * Serve one stored image by its bare attachment id (the GET half of the
+ * prefix route). Unknown ids and store failures answer 404; the media type
+@@ -229,7 +280,13 @@ async function serveRawImage(ctx, req, res) {
+ 		res.end();
+ 		return;
+ 	}
+-	const ref = attachmentRefById(decodeURIComponent(match[1]));
++	const encodedId = match[1];
++	if (encodedId === void 0) {
++		res.writeHead(404);
++		res.end();
++		return;
++	}
++	const ref = attachmentRefById(decodeURIComponent(encodedId));
+ 	if (ref === void 0) {
+ 		res.writeHead(404);
+ 		res.end();
+@@ -268,6 +325,16 @@ function registerAttachRoute(ctx, readMaxBytes = () => DEFAULT_MAX_BYTES) {
+ 		kind: "prefix",
+ 		path: "/describe-image",
+ 		handler: async (req, res) => {
++			if (!authorizeAttachRequest(ctx, req)) {
++				json(res, {
++					ok: false,
++					error: {
++						code: "internal",
++						message: "forbidden"
++					}
++				}, 403);
++				return;
++			}
+ 			if (req.method === "GET") {
+ 				await serveRawImage(ctx, req, res);
+ 				return;
+@@ -327,7 +394,7 @@ function registerAttachRoute(ctx, readMaxBytes = () => DEFAULT_MAX_BYTES) {
+ * @module @linxin666/dsh-tool-describe-image
+ */
+ const name = "describe-image";
+-const inject = ["tools", "webServer"];
++const inject = ["tools"];
+ /** Environment-variable name the API key resolves through when no inline key is configured. */
+ const DEFAULT_API_KEY_ENV = "VISION_API_KEY";
+ /** Per-call output-token cap sent to the vision model. */
+@@ -345,7 +412,12 @@ const Config = z.object({
+ 	defaultPrompt: z.string().default(DEFAULT_PROMPT),
+ 	maxBytes: z.number().step(1).min(1).default(DEFAULT_MAX_BYTES),
+ 	maxOutputTokens: z.number().step(1).min(1).default(DEFAULT_MAX_OUTPUT_TOKENS),
+-	timeoutMs: z.number().min(1).default(DEFAULT_TIMEOUT_MS)
++	timeoutMs: z.number().min(1).default(DEFAULT_TIMEOUT_MS),
++	surface: z.union([
++		"both",
++		"host",
++		"agent"
++	]).default("both").hidden()
+ });
+ /** Settings namespace carrying the endpoint, model, and key reference the Plugins card edits. */
+ const DESCRIBE_IMAGE_SETTINGS_NAMESPACE = settingsNamespace("describe-image");
+@@ -626,9 +698,12 @@ function describeImageCallView(args) {
+ * @param config - deployment configuration.
+ */
+ function apply(ctx, config = {}) {
++	const surface = config.surface ?? "both";
++	const ownsHostSurface = surface !== "agent";
++	const ownsAgentSurface = surface !== "host";
+ 	if (config.baseURL !== void 0 || config.model !== void 0) resolveConfig(config);
+-	let current = () => config;
+-	installSettingsSection(ctx, DESCRIBE_IMAGE_SETTINGS_NAMESPACE, Config, config, {
++	let current = ownsHostSurface ? () => config : () => ctx.get("settings")?.get(DESCRIBE_IMAGE_SETTINGS_NAMESPACE) ?? config;
++	if (ownsHostSurface) installSettingsSection(ctx, DESCRIBE_IMAGE_SETTINGS_NAMESPACE, Config, config, {
+ 		setSource: (source) => {
+ 			current = source;
+ 		},
+@@ -638,8 +713,8 @@ function apply(ctx, config = {}) {
+ 		}
+ 	});
+ 	const spec = () => resolveConfig(current());
+-	registerAttachRoute(ctx, () => current().maxBytes ?? 10485760);
+-	ctx.tools.register(defineTool({
++	if (ownsHostSurface) registerAttachRoute(ctx, () => current().maxBytes ?? 10485760);
++	if (ownsAgentSurface) ctx.tools.register(defineTool({
+ 		name: "describe_image",
+ 		description: "Inspect one image — a local absolute path, an http(s) URL, or the JSON of an image attachment note — and return the text the user needs. Use when the user references an image file or URL, or when a task needs OCR, chart or diagram reading, screenshot or UI analysis, translation of image text, or photo understanding. Always pass an explicit `prompt` with a precise instruction — e.g. \"transcribe all text\", \"extract the table as CSV\", \"diagnose the UI layout problems\", \"translate the text into Chinese\" — instead of leaving it to the default description: a targeted instruction produces a much more useful answer. The image may be a local path, an http(s) URL, the JSON object from an `[image attachment …]` note, or — the common case when the user used this plugin's input-box image button — a short markdown image reference like `![图片](/describe-image/raw/sha256:abc…)` pasted into the conversation. In the markdown form, take the attachment id from the URL and pass that id as the `image` value (never the whole markdown, and never a made-up path); the tool resolves the id to the stored image. The image itself never enters the conversation — only the returned text is shown to you.",
+ 		parameters: {
+diff --git a/lib/types/attach-routes.d.ts b/lib/types/attach-routes.d.ts
+index f15012cec21a4a6ccb43b546d60cd0e65c447976..e080b78c026f0d1d5c08cff1662c4273fcb2728a 100644
+--- a/lib/types/attach-routes.d.ts
++++ b/lib/types/attach-routes.d.ts
+@@ -12,9 +12,21 @@
+  * is resolved per call, failing with a clear message when it is absent.
+  * @module @linxin666/dsh-tool-describe-image/attach
+  */
++import type { IncomingMessage } from 'node:http';
+ import type { Context } from '@deepseek-ai/cordis';
+ import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment';
+ import { type ImageMimeType } from './media.ts';
++declare module '@deepseek-ai/cordis' {
++    interface Events {
++        /**
++         * Authorize one non-loopback HTTP plugin request through the active
++         * remote-control pairing session.
++         * @param request - incoming plugin HTTP request.
++         * @mode bail
++         */
++        'remote-web-ui/authorize-http'(request: IncomingMessage): 'allow' | 'deny' | undefined;
++    }
++}
+ /** Request-body byte cap: base64 of a {@link DEFAULT_MAX_BYTES} image plus envelope slack. */
+ export declare const MAX_ATTACH_BODY_BYTES: number;
+ /** Stable error codes the browser half surfaces without leaking internals. */
+@@ -82,6 +94,14 @@ export declare function validateAttachPayload(payload: unknown, maxBytes: number
+  * @returns the stored reference and its note text, or a structured rejection.
+  */
+ export declare function handleAttach(ctx: Context, maxBytes: number, payload: unknown): Promise<AttachOutcome>;
++/**
++ * Authorize one attach/raw request before it can read a body or attachment.
++ * A tunnel reaches the host over a loopback socket, so local trust requires
++ * both a loopback socket and a loopback Host. Other requests delegate to the
++ * remote-control plugin's live pairing-cookie check and fail closed when the
++ * plugin is absent.
++ */
++export declare function authorizeAttachRequest(ctx: Context, req: IncomingMessage): boolean;
+ /**
+  * Register the /describe-image/attach POST route on the shared webserver. The
+  * byte bound is read per request so the Settings card's maxBytes change lands
+diff --git a/lib/types/index.d.ts b/lib/types/index.d.ts
+index 4cc9b3724eb2b86744e021b6a27595f576445958..4e9562238cdc5271c66594a782b349f152efedaa 100644
+--- a/lib/types/index.d.ts
++++ b/lib/types/index.d.ts
+@@ -20,6 +20,8 @@ import type { GenericCallView } from '@deepseek-ai/dsh-tools';
+ import { type ImageMimeType } from './media.ts';
+ export declare const name = "describe-image";
+ export declare const inject: string[];
++/** Which half of the dual-face plugin one composition row owns. */
++export type DescribeImageSurface = 'both' | 'host' | 'agent';
+ /** Environment-variable name the API key resolves through when no inline key is configured. */
+ export declare const DEFAULT_API_KEY_ENV = "VISION_API_KEY";
+ /** Per-call output-token cap sent to the vision model. */
+@@ -52,6 +54,8 @@ export interface Config {
+     maxOutputTokens?: number;
+     /** Per-call request timeout; defaults to {@link DEFAULT_TIMEOUT_MS}. */
+     timeoutMs?: number;
++    /** Internal composition split: Host upload/settings or preset-scoped model tool. */
++    surface?: DescribeImageSurface;
+ }
+ /** Schemastery configuration for the describe-image tool; doubles as the `describe-image` settings-section schema. */
+ export declare const Config: z<Config>;
+diff --git a/lib/types/index.d.ts.map b/lib/types/index.d.ts.map
+index 5a013b3e2b7b57a5c257d23364d15406c74b6200..dabcd9ea2aab5763cc06dcc13e7ede3292dcd2d4 100644
+--- a/lib/types/index.d.ts.map
++++ b/lib/types/index.d.ts.map
+@@ -1 +1 @@
+-{"version":3,"file":"index.d.ts","sourceRoot":"","sources":["../../src/index.ts"],"names":[],"mappings":"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"}
+\ No newline at end of file
++{"version":3,"file":"index.d.ts","sourceRoot":"","sources":["../../src/index.ts"],"names":[],"mappings":"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"}
+\ No newline at end of file
+diff --git a/src/attach-routes.ts b/src/attach-routes.ts
+index 277a2299de1c8982fc14d6935bbbb86de7c27c06..a99b9299e7c1d3a1fe6d5509bb671ff654ef22c0 100644
+--- a/src/attach-routes.ts
++++ b/src/attach-routes.ts
+@@ -18,6 +18,18 @@ import type { Context } from '@deepseek-ai/cordis'
+ import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+ import { decodeBase64, isImageMimeType, sniffMimeType, DEFAULT_MAX_BYTES, type ImageMimeType } from './media.ts'
+ 
++declare module '@deepseek-ai/cordis' {
++  interface Events {
++    /**
++     * Authorize one non-loopback HTTP plugin request through the active
++     * remote-control pairing session.
++     * @param request - incoming plugin HTTP request.
++     * @mode bail
++     */
++    'remote-web-ui/authorize-http'(request: IncomingMessage): 'allow' | 'deny' | undefined
++  }
++}
++
+ /** Request-body byte cap: base64 of a {@link DEFAULT_MAX_BYTES} image plus envelope slack. */
+ export const MAX_ATTACH_BODY_BYTES = 16 * 1024 * 1024
+ 
+@@ -129,7 +141,10 @@ export function validateAttachPayload(payload: unknown, maxBytes: number): { pay
+   if (sniffMimeType(bytes) !== mediaType) {
+     return { error: { code: 'rejected', message: `bytes do not match the declared ${mediaType} type` } }
+   }
+-  return { payload: { data, mediaType, name }, bytes }
++  return {
++    payload: { data, mediaType, ...(name === undefined ? {} : { name }) },
++    bytes,
++  }
+ }
+ 
+ /**
+@@ -186,6 +201,70 @@ function json(res: ServerResponse, envelope: unknown, status = 200): void {
+   res.end(JSON.stringify(envelope))
+ }
+ 
++/** Whether a socket address belongs to the local loopback range. */
++function isLoopbackAddress(address: string | undefined): boolean {
++  if (address === undefined) return false
++  const normalized = address.toLowerCase()
++  if (normalized === '::1') return true
++  const v4 = normalized.startsWith('::ffff:') ? normalized.slice('::ffff:'.length) : normalized
++  const parts = v4.split('.')
++  return parts.length === 4
++    && parts[0] === '127'
++    && parts.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255)
++}
++
++/** Parse the request Host into the authority used for origin checks. */
++function requestHost(req: IncomingMessage): URL | undefined {
++  const host = req.headers.host
++  if (typeof host !== 'string') return undefined
++  try {
++    return new URL(`http://${host}`)
++  } catch {
++    return undefined
++  }
++}
++
++/** Whether the Host authority itself names a local loopback endpoint. */
++function isLoopbackHostname(hostname: string): boolean {
++  if (hostname === 'localhost' || hostname === '[::1]') return true
++  const parts = hostname.split('.')
++  return parts.length === 4
++    && parts[0] === '127'
++    && parts.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255)
++}
++
++/** Headers that mark a loopback socket as the last proxy hop, not the client. */
++const PROXY_CLIENT_HEADERS = [
++  'cf-connecting-ip',
++  'x-forwarded-for',
++  'forwarded',
++  'x-real-ip',
++] as const
++
++/**
++ * Authorize one attach/raw request before it can read a body or attachment.
++ * A tunnel reaches the host over a loopback socket, so local trust requires
++ * both a loopback socket and a loopback Host. Other requests delegate to the
++ * remote-control plugin's live pairing-cookie check and fail closed when the
++ * plugin is absent.
++ */
++export function authorizeAttachRequest(ctx: Context, req: IncomingMessage): boolean {
++  if (req.headers['sec-fetch-site'] === 'cross-site') return false
++  const host = requestHost(req)
++  if (host === undefined) return false
++  const origin = req.headers.origin
++  if (origin !== undefined) {
++    try {
++      if (new URL(origin).host !== host.host) return false
++    } catch {
++      return false
++    }
++  }
++  const proxied = PROXY_CLIENT_HEADERS.some(name => req.headers[name] !== undefined)
++  if (!proxied && isLoopbackAddress(req.socket.remoteAddress) && isLoopbackHostname(host.hostname)) return true
++  return ctx.bail(ctx, 'remote-web-ui/authorize-http', req) === 'allow'
++}
++
+ /**
+  * Serve one stored image by its bare attachment id (the GET half of the
+  * prefix route). Unknown ids and store failures answer 404; the media type
+@@ -201,7 +280,13 @@ async function serveRawImage(ctx: Context, req: IncomingMessage, res: ServerResp
+     res.end()
+     return
+   }
+-  const id = decodeURIComponent(match[1])
++  const encodedId = match[1]
++  if (encodedId === undefined) {
++    res.writeHead(404)
++    res.end()
++    return
++  }
++  const id = decodeURIComponent(encodedId)
+   const ref = attachmentRefById(id)
+   if (ref === undefined) {
+     res.writeHead(404)
+@@ -238,10 +323,14 @@ export function registerAttachRoute(ctx: Context, readMaxBytes: () => number = (
+     kind: 'prefix',
+     path: '/describe-image',
+     handler: async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
++      if (!authorizeAttachRequest(ctx, req)) {
++        json(res, { ok: false, error: { code: 'internal', message: 'forbidden' } }, 403)
++        return
++      }
+       // GET /describe-image/raw/<id>: serve the stored bytes so the
+       // markdown image reference inserted into the draft renders. The id is
+-      // content-addressed and loopback-only, so a bare read carries no
+-      // secrets; the store's digest verification still runs.
++      // content-addressed; local requests are loopback-only and remote reads
++      // require a live paired-device cookie.
+       if (req.method === 'GET') {
+         await serveRawImage(ctx, req, res)
+         return
+diff --git a/src/index.ts b/src/index.ts
+index 346f34b05e184fd184cc66011c72cddd27f95c93..2bc8d269f0fa9d6018e5ca1b4d94b1234334a1c8 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -28,7 +28,10 @@ import { attachmentRefById, registerAttachRoute } from './attach-routes.ts'
+ import { DEFAULT_MAX_BYTES, sniffMimeType, type ImageMimeType } from './media.ts'
+ 
+ export const name = 'describe-image'
+-export const inject = ['tools', 'webServer']
++export const inject = ['tools']
++
++/** Which half of the dual-face plugin one composition row owns. */
++export type DescribeImageSurface = 'both' | 'host' | 'agent'
+ 
+ /** Environment-variable name the API key resolves through when no inline key is configured. */
+ export const DEFAULT_API_KEY_ENV = 'VISION_API_KEY'
+@@ -65,6 +68,8 @@ export interface Config {
+   maxOutputTokens?: number
+   /** Per-call request timeout; defaults to {@link DEFAULT_TIMEOUT_MS}. */
+   timeoutMs?: number
++  /** Internal composition split: Host upload/settings or preset-scoped model tool. */
++  surface?: DescribeImageSurface
+ }
+ 
+ /** Schemastery configuration for the describe-image tool; doubles as the `describe-image` settings-section schema. */
+@@ -77,6 +82,7 @@ export const Config: z<Config> = z.object({
+   maxBytes: z.number().step(1).min(1).default(DEFAULT_MAX_BYTES),
+   maxOutputTokens: z.number().step(1).min(1).default(DEFAULT_MAX_OUTPUT_TOKENS),
+   timeoutMs: z.number().min(1).default(DEFAULT_TIMEOUT_MS),
++  surface: z.union(['both', 'host', 'agent'] as const).default('both').hidden(),
+ })
+ 
+ /** Settings namespace carrying the endpoint, model, and key reference the Plugins card edits. */
+@@ -429,6 +435,9 @@ export function describeImageCallView(args: DescribeImageArgs): GenericCallView
+  * @param config - deployment configuration.
+  */
+ export function apply(ctx: Context, config: Config = {}): void {
++  const surface = config.surface ?? 'both'
++  const ownsHostSurface = surface !== 'agent'
++  const ownsAgentSurface = surface !== 'host'
+   // The loader fills schema defaults before apply, so an unconfigured entry
+   // still arrives with default fields set. Only a config that actually names
+   // the endpoint/model is validated eagerly — the family aggregate mounts
+@@ -436,21 +445,25 @@ export function apply(ctx: Context, config: Config = {}): void {
+   if (config.baseURL !== undefined || config.model !== undefined) {
+     resolveConfig(config)
+   }
+-  let current: () => Config = () => config
+-  installSettingsSection(ctx, DESCRIBE_IMAGE_SETTINGS_NAMESPACE, Config, config, {
+-    setSource: (source) => {
+-      current = source
+-    },
+-    onChange: () => {},
+-    validate: (value) => {
+-      if (value.baseURL !== undefined || value.model !== undefined) resolveConfig(value)
+-    },
+-  })
++  let current: () => Config = ownsHostSurface
++    ? () => config
++    : () => (ctx.get('settings')?.get(DESCRIBE_IMAGE_SETTINGS_NAMESPACE) as Config | undefined) ?? config
++  if (ownsHostSurface) {
++    installSettingsSection(ctx, DESCRIBE_IMAGE_SETTINGS_NAMESPACE, Config, config, {
++      setSource: (source) => {
++        current = source
++      },
++      onChange: () => {},
++      validate: (value) => {
++        if (value.baseURL !== undefined || value.model !== undefined) resolveConfig(value)
++      },
++    })
++  }
+   const spec = (): ResolvedConfig => resolveConfig(current())
+   // The webserver is optional (the loader-composition tests boot without one):
+   // the attach route registers only when the service is actually mounted.
+-  registerAttachRoute(ctx, () => current().maxBytes ?? DEFAULT_MAX_BYTES)
+-  ctx.tools.register(defineTool({
++  if (ownsHostSurface) registerAttachRoute(ctx, () => current().maxBytes ?? DEFAULT_MAX_BYTES)
++  if (ownsAgentSurface) ctx.tools.register(defineTool({
+     name: 'describe_image',
+     description: DESCRIPTION_HEAD
+       + 'The image may be a local path, an http(s) URL, the JSON object from an `[image attachment …]` '

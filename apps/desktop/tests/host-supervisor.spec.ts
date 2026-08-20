@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   createHostSupervisor,
   createReadinessParser,
+  validateDshProfile,
   type HostChild,
 } from '../src/host-supervisor.ts'
 
@@ -172,6 +173,19 @@ describe('desktop Host supervisor', () => {
     expect(spawnHost).not.toHaveBeenCalled()
   })
 
+  it('joins shutdown while startup is still waiting for readiness', async () => {
+    const child = new FakeHostChild()
+    const supervisor = createHostSupervisor({ spawnHost: () => child })
+    const starting = supervisor.start()
+
+    const closing = supervisor.shutdown()
+    expect(child.signals).toEqual(['SIGTERM'])
+    child.emitExit(null, 'SIGTERM')
+
+    await expect(closing).resolves.toBeUndefined()
+    await expect(starting).rejects.toThrow('exited before readiness')
+  })
+
   it('rejects startup when the child exits after an unterminated readiness fragment', async () => {
     const child = new FakeHostChild()
     const supervisor = createHostSupervisor({ spawnHost: () => child })
@@ -250,7 +264,7 @@ describe('desktop Host supervisor', () => {
     expect(child.signals).toEqual(['SIGTERM'])
   })
 
-  it('escalates a stuck shutdown once and still waits for child exit', async () => {
+  it('escalates a stuck shutdown once and accepts exit before the forced deadline', async () => {
     vi.useFakeTimers()
     const child = new FakeHostChild()
     const supervisor = createHostSupervisor({
@@ -270,12 +284,30 @@ describe('desktop Host supervisor', () => {
     expect(child.signals).toEqual(['SIGTERM', 'SIGKILL'])
     expect(settled).not.toHaveBeenCalled()
 
-    await vi.advanceTimersByTimeAsync(100)
-    expect(child.signals).toEqual(['SIGTERM', 'SIGKILL'])
+    await vi.advanceTimersByTimeAsync(24)
     child.emitExit(null, 'SIGKILL')
     await vi.advanceTimersByTimeAsync(0)
     expect(settled).toHaveBeenCalledOnce()
     await expect(closing).resolves.toBeUndefined()
+  })
+
+  it('rejects after a bounded wait when SIGKILL never produces an exit event', async () => {
+    vi.useFakeTimers()
+    const child = new FakeHostChild()
+    const supervisor = createHostSupervisor({
+      spawnHost: () => child,
+      shutdownTimeoutMs: 25,
+    })
+    const starting = supervisor.start()
+    child.stdout.emit('dsh web: http://127.0.0.1:4567\n')
+    await starting
+
+    const closing = supervisor.shutdown()
+    const rejected = expect(closing).rejects.toThrow('did not exit within 25ms after SIGKILL')
+    await vi.advanceTimersByTimeAsync(50)
+
+    expect(child.signals).toEqual(['SIGTERM', 'SIGKILL'])
+    await rejected
   })
 })
 
@@ -301,8 +333,123 @@ describe('desktop Host process', () => {
 
     expect(spawn).toHaveBeenCalledWith(
       '/Applications/DeepSeeker.app/Contents/MacOS/DeepSeeker',
-      ['--expose-internals', expect.stringContaining('/Resources/host/node_modules/@deepseek-ai/dsh/lib/bin.js'), 'web', '--host', '127.0.0.1', '--port', '0'],
+      ['--expose-internals', expect.stringContaining('/Resources/host/node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'web', '--host', '127.0.0.1', '--port', '0'],
       expect.objectContaining({ env: { DSH_DESKTOP: '1', ELECTRON_RUN_AS_NODE: '1' } }),
     )
+  })
+
+  it('uses taskkill tree mode for the production Windows child adapter', async () => {
+    const source = await import('node:fs/promises').then(({ readFile }) =>
+      readFile(new URL('../src/host-supervisor.ts', import.meta.url), 'utf8'))
+    expect(source).toContain("'/T'")
+    expect(source).toContain("...(signal === 'SIGKILL' ? ['/F'] : [])")
+  })
+})
+
+describe('desktop configuration profile validation', () => {
+  const options = (child: FakeHostChild) => ({
+    nodeExecutable: 'node',
+    cliEntry: '/tmp/dsh.js',
+    cwd: '/tmp',
+    env: { DSH_HOME: '/tmp/scheme' },
+    profileName: 'web',
+    spawnValidation: () => child,
+  })
+
+  it('accepts only a successful dump-config child without touching the Host supervisor', async () => {
+    const child = new FakeHostChild()
+    const validation = validateDshProfile(options(child))
+    child.stdout.emit('composed profile\n')
+    child.emitExit(0)
+
+    await expect(validation).resolves.toBeUndefined()
+    expect(child.signals).toEqual([])
+  })
+
+  it('does not spawn a validation child after application shutdown cancellation', async () => {
+    const controller = new AbortController()
+    const spawnValidation = vi.fn(() => new FakeHostChild())
+    controller.abort()
+
+    await expect(validateDshProfile({
+      ...options(new FakeHostChild()),
+      signal: controller.signal,
+      spawnValidation,
+    })).rejects.toThrow('配置方案检查已取消')
+    expect(spawnValidation).not.toHaveBeenCalled()
+  })
+
+  it('cancels an active validation and joins its child exit', async () => {
+    const controller = new AbortController()
+    const child = new FakeHostChild()
+    const validation = validateDshProfile({ ...options(child), signal: controller.signal })
+    const settled = observeSettlement(validation)
+
+    controller.abort()
+    expect(child.signals).toEqual(['SIGTERM'])
+    expect(settled).not.toHaveBeenCalled()
+
+    child.emitExit(null, 'SIGTERM')
+    await expect(validation).rejects.toThrow('配置方案检查已取消')
+  })
+
+  it('keeps bounded diagnostics when validation fails', async () => {
+    const child = new FakeHostChild()
+    const validation = validateDshProfile(options(child))
+    child.stderr.emit('invalid profile manifest')
+    child.emitExit(2)
+
+    await expect(validation).rejects.toThrow(/检查失败.*invalid profile manifest/su)
+  })
+
+  it('waits for a timed-out validation probe to exit after SIGTERM', async () => {
+    vi.useFakeTimers()
+    const child = new FakeHostChild()
+    const validation = validateDshProfile({ ...options(child), timeoutMs: 25, shutdownTimeoutMs: 10 })
+    const settled = observeSettlement(validation)
+    const rejected = expect(validation).rejects.toThrow('超过 25ms')
+
+    await vi.advanceTimersByTimeAsync(25)
+    expect(child.signals).toEqual(['SIGTERM'])
+    expect(settled).not.toHaveBeenCalled()
+
+    child.emitExit(null, 'SIGTERM')
+    await rejected
+    expect(child.signals).toEqual(['SIGTERM'])
+  })
+
+  it('escalates a timed-out validation probe and still waits for its forced exit', async () => {
+    vi.useFakeTimers()
+    const child = new FakeHostChild()
+    const validation = validateDshProfile({ ...options(child), timeoutMs: 25, shutdownTimeoutMs: 10 })
+    const settled = observeSettlement(validation)
+    const rejected = expect(validation).rejects.toThrow('超过 25ms')
+
+    await vi.advanceTimersByTimeAsync(25)
+    expect(child.signals).toEqual(['SIGTERM'])
+    await vi.advanceTimersByTimeAsync(10)
+    expect(child.signals).toEqual(['SIGTERM', 'SIGKILL'])
+    expect(settled).not.toHaveBeenCalled()
+
+    child.emitExit(null, 'SIGKILL')
+    await rejected
+  })
+
+  it('rejects after a bounded wait when a forced validation probe never reports exit', async () => {
+    vi.useFakeTimers()
+    const child = new FakeHostChild()
+    const validation = validateDshProfile({ ...options(child), timeoutMs: 25, shutdownTimeoutMs: 10 })
+    const settled = observeSettlement(validation)
+    const rejected = expect(validation).rejects.toThrow('强制停止后 10ms 内仍未退出')
+
+    await vi.advanceTimersByTimeAsync(25)
+    await vi.advanceTimersByTimeAsync(10)
+    expect(child.signals).toEqual(['SIGTERM', 'SIGKILL'])
+    expect(settled).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(9)
+    expect(settled).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    await rejected
   })
 })

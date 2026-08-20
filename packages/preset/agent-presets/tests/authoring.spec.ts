@@ -88,6 +88,30 @@ describe('copying a preset', () => {
     }
   })
 
+  it('never carries a false executable bit from preset configuration or documentation', async () => {
+    await seedPreset(userRoot, 'source', {
+      metadata: 'description: Source preset\n',
+      extras: { 'skills/demo/SKILL.md': '# demo\n', 'skills/demo/run.sh': '#!/bin/sh\n' },
+    })
+    if (process.platform !== 'win32') {
+      await Promise.all([
+        chmod(join(userRoot, 'source', COMPOSITION_FILE), 0o700),
+        chmod(join(userRoot, 'source', METADATA_FILE), 0o700),
+        chmod(join(userRoot, 'source', 'skills', 'demo', 'SKILL.md'), 0o700),
+        chmod(join(userRoot, 'source', 'skills', 'demo', 'run.sh'), 0o700),
+      ])
+    }
+
+    await ctx.agentPresets.copy('source', 'mine')
+
+    if (process.platform !== 'win32') {
+      expect((await stat(join(userRoot, 'mine', COMPOSITION_FILE))).mode & 0o777).toBe(0o600)
+      expect((await stat(join(userRoot, 'mine', METADATA_FILE))).mode & 0o777).toBe(0o600)
+      expect((await stat(join(userRoot, 'mine', 'skills', 'demo', 'SKILL.md'))).mode & 0o777).toBe(0o600)
+      expect((await stat(join(userRoot, 'mine', 'skills', 'demo', 'run.sh'))).mode & 0o777).toBe(0o700)
+    }
+  })
+
   it('keeps the source description but never its name or order', async () => {
     await seedPreset(userRoot, 'source', { metadata: 'name: 源模式\ndescription: 只做检索。\norder: 1\n' })
 

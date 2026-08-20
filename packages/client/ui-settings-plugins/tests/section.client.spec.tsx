@@ -5,7 +5,7 @@
  * unavailable, and the save footer that decides when staged edits are written.
  */
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { bindSnapshotSelector } from '@deepseek-ai/dsh-client-web-react'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
@@ -37,6 +37,7 @@ const settled: CardShell = {
   invalid: false,
   saving: false,
   failed: false,
+  error: null,
 }
 
 /** One control's state, defaulting to an inherited value. */
@@ -260,6 +261,7 @@ describe('BashCard', () => {
 
     expect(screen.getByRole('button', { name: en.saving })).toHaveProperty('disabled', true)
     expect(screen.getByRole('button', { name: en.discard })).toHaveProperty('disabled', true)
+    expect(screen.getByLabelText(en.bashTimeoutMs)).toHaveProperty('disabled', true)
   })
 
   it('reports a save the deployment did not accept', () => {
@@ -267,6 +269,32 @@ describe('BashCard', () => {
     fireEvent.click(screen.getByText(en.bashTitle))
 
     expect(screen.getByText(en.saveFailed)).toBeTruthy()
+  })
+
+  it('returns from saving with a retryable timeout message', () => {
+    const store = createSnapshotStore<BashCardState>({
+      ...settled,
+      dirty: true,
+      saving: true,
+      timeoutMs: field('9000'),
+      maxOutputBytes: field('64000'),
+    })
+    const actions = cardActions()
+    const props = { ...actions, t, useBashCard: bindSnapshotSelector(store) } as unknown as BashCardProps
+    render(<BashCard {...props} />)
+    fireEvent.click(screen.getByText(en.bashTitle))
+
+    expect(screen.getByRole('button', { name: en.saving })).toHaveProperty('disabled', true)
+
+    act(() => {
+      store.set({ ...store.getSnapshot(), saving: false, failed: true, error: 'saveTimedOut' })
+    })
+
+    const status = screen.getByRole('status')
+    expect(status.textContent).toContain(en.saveFailed)
+    expect(status.textContent).toContain(en.saveTimedOut)
+    expect(screen.getByRole('button', { name: en.save })).toHaveProperty('disabled', false)
+    expect(screen.getByLabelText(en.bashTimeoutMs)).toHaveProperty('value', '9000')
   })
 
   it('says the document is read-only and disables its controls', () => {

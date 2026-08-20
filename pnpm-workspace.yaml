@@ -48,6 +48,10 @@ allowBuilds:
   lefthook: true
   # Cross-platform boundary for the persistent PTY backend, including ConPTY on Windows.
   node-pty: true
+  # DeepSeeker's remote and SSH feature suite ships these reviewed native/runtime installers.
+  cloudflared: true
+  cpu-features: true
+  ssh2: true
   # Pulled in by @earendil-works/pi-ai (optional LLM API backend). pnpm lists
   # them only because they ship lifecycle scripts, but those are no-ops we don't
   # need, so we deny them — install still succeeds.
@@ -76,7 +80,29 @@ minimumReleaseAgeExclude:
   - node-addon-require-builtin-win32-ia32-msvc@0.1.4
   - node-addon-require-builtin-win32-x64-msvc@0.1.4
   - node-addon-require-builtin@0.1.4
+  - '@linxin666/dsh-client-ui-aionui-panel@0.1.12'
+  - '@linxin666/dsh-client-ui-git-graph@0.1.12'
+  - '@linxin666/dsh-client-ui-skin-center@0.1.12'
+  - '@linxin666/dsh-client-ui-task-board@0.1.12'
+  - '@linxin666/dsh-client-ui-web-ui-settings@0.1.12'
+  - '@linxin666/dsh-live-stats@0.1.12'
+  - '@linxin666/dsh-pet@0.1.12'
+  - '@linxin666/dsh-remote-web-ui@0.1.12'
+  - '@linxin666/dsh-skins@0.1.12'
+  - '@linxin666/dsh-ssh@0.1.12'
+  - '@linxin666/dsh-tool-describe-image@0.1.12'
+  - '@linxin666/dsh-web-ui-all@0.1.12'
 
 patchedDependencies:
+  '@linxin666/dsh-client-ui-aionui-panel@0.1.12': patches/@linxin666__dsh-client-ui-aionui-panel@0.1.12.patch
+  '@linxin666/dsh-client-ui-git-graph@0.1.12': patches/@linxin666__dsh-client-ui-git-graph@0.1.12.patch
+  '@linxin666/dsh-client-ui-skin-center@0.1.12': patches/@linxin666__dsh-client-ui-skin-center@0.1.12.patch
+  '@linxin666/dsh-client-ui-task-board@0.1.12': patches/@linxin666__dsh-client-ui-task-board@0.1.12.patch
+  '@linxin666/dsh-client-ui-web-ui-settings@0.1.12': patches/@linxin666__dsh-client-ui-web-ui-settings@0.1.12.patch
+  '@linxin666/dsh-live-stats@0.1.12': patches/@linxin666__dsh-live-stats@0.1.12.patch
+  '@linxin666/dsh-pet@0.1.12': patches/@linxin666__dsh-pet@0.1.12.patch
+  '@linxin666/dsh-remote-web-ui@0.1.12': patches/@linxin666__dsh-remote-web-ui@0.1.12.patch
+  '@linxin666/dsh-ssh@0.1.12': patches/@linxin666__dsh-ssh@0.1.12.patch
+  '@linxin666/dsh-tool-describe-image@0.1.12': patches/@linxin666__dsh-tool-describe-image@0.1.12.patch
   app-builder-lib@26.15.3: patches/app-builder-lib@26.15.3.patch
   node-pty@1.1.0: patches/node-pty@1.1.0.patch

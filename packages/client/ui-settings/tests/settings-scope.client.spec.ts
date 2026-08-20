@@ -232,6 +232,105 @@ describe('SettingsScopeController', () => {
     expect(published.map(section => section?.preference)).toEqual([undefined, 'light'])
   })
 
+  it('rejects pre-canceled writes without admitting them to the queue', async () => {
+    const describeCall = vi.fn()
+    const mutate = vi.fn()
+    const scope = new SettingsScopeController<UiTestSettings>(
+      { settings: { describe: describeCall, mutate } } as never,
+      { namespace: 'ui-test' },
+    )
+    const canceled = new AbortController()
+    const reason = new Error('canceled before settings write')
+    canceled.abort(reason)
+    const nonError = new AbortController()
+    nonError.abort('unset canceled before settings write')
+
+    await expect(scope.set('preference', 'dark', canceled.signal)).rejects.toBe(reason)
+    await expect(scope.unset('preference', nonError.signal)).rejects.toMatchObject({
+      message: 'settings write aborted',
+      cause: 'unset canceled before settings write',
+    })
+
+    expect(mutate).not.toHaveBeenCalled()
+    expect(describeCall).not.toHaveBeenCalled()
+  })
+
+  it('removes a canceled queued write without delaying its caller or hiding the prior settlement', async () => {
+    const first = deferred<RpcResponse<SettingsNamespaceView>>()
+    const mutate = vi.fn().mockReturnValue(first.promise)
+    const describeCall = vi.fn()
+    const scope = new SettingsScopeController<UiTestSettings>(
+      { settings: { describe: describeCall, mutate } } as never,
+      { namespace: 'ui-test' },
+    )
+    const published = trackValues(scope)
+    const dark = scope.set('preference', 'dark')
+    await vi.waitFor(() => { expect(mutate).toHaveBeenCalledOnce() })
+    const canceled = new AbortController()
+    const light = scope.set('preference', 'light', canceled.signal)
+    const reason = new Error('canceled in settings queue')
+
+    canceled.abort(reason)
+
+    await expect(light).rejects.toBe(reason)
+    expect(mutate).toHaveBeenCalledOnce()
+    first.resolve(ok(view({ preference: 'dark' }, 1)))
+    await dark
+    expect(mutate).toHaveBeenCalledOnce()
+    expect(describeCall).not.toHaveBeenCalled()
+    expect(published.map(section => section?.preference)).toEqual([undefined, 'dark'])
+  })
+
+  it('passes in-flight cancellation to the transport and does not recover it', async () => {
+    let requestSignal: AbortSignal | undefined
+    const mutate = vi.fn((_payload: unknown, signal?: AbortSignal) => {
+      requestSignal = signal
+      return new Promise<RpcResponse<SettingsNamespaceView>>((_resolve, reject) => {
+        signal?.addEventListener('abort', () => { reject(new Error('transport aborted')) }, { once: true })
+      })
+    })
+    const describeCall = vi.fn()
+    const scope = new SettingsScopeController<UiTestSettings>(
+      { settings: { describe: describeCall, mutate } } as never,
+      { namespace: 'ui-test' },
+    )
+    const canceled = new AbortController()
+    const write = scope.set('preference', 'dark', canceled.signal)
+    await vi.waitFor(() => { expect(mutate).toHaveBeenCalledOnce() })
+    const reason = new Error('canceled across settings transport')
+
+    canceled.abort(reason)
+
+    await expect(write).rejects.toBe(reason)
+    expect(requestSignal).toBe(canceled.signal)
+    expect(describeCall).not.toHaveBeenCalled()
+  })
+
+  it('ignores a successful response that arrives after in-flight cancellation', async () => {
+    const late = deferred<RpcResponse<SettingsNamespaceView>>()
+    const mutate = vi.fn().mockReturnValue(late.promise)
+    const describeCall = vi.fn().mockResolvedValueOnce(described({ preference: 'system' }, 1))
+    const scope = new SettingsScopeController<UiTestSettings>(
+      { settings: { describe: describeCall, mutate } } as never,
+      { namespace: 'ui-test' },
+    )
+    await scope.load()
+    const published = trackValues(scope)
+    const canceled = new AbortController()
+    const write = scope.set('preference', 'dark', canceled.signal)
+    await vi.waitFor(() => { expect(mutate).toHaveBeenCalledOnce() })
+    const reason = new Error('settings deadline elapsed')
+
+    canceled.abort(reason)
+
+    await expect(write).rejects.toBe(reason)
+    late.resolve(ok(view({ preference: 'dark' }, 2)))
+    await scope.dispose()
+    expect(describeCall).toHaveBeenCalledOnce()
+    expect(published.map(section => section?.preference)).toEqual(['system'])
+    expect(scope.getSnapshot()).toMatchObject({ value: { preference: 'system' }, revision: 1 })
+  })
+
   it('keeps the write queue usable when a subscriber throws', async () => {
     const describeCall = vi.fn()
       .mockResolvedValueOnce(described({ preference: 'dark' }, 1))
@@ -249,6 +348,21 @@ describe('SettingsScopeController', () => {
     await expect(scope.load()).rejects.toThrow('subscriber failed')
     await expect(scope.load()).resolves.toBeUndefined()
     expect(scope.getSnapshot()).toMatchObject({ value: { preference: 'light' }, revision: 2 })
+  })
+
+  it('normalizes a non-Error subscriber failure from a signaled write', async () => {
+    const mutate = vi.fn().mockResolvedValueOnce(ok(view({ preference: 'dark' }, 1)))
+    const scope = new SettingsScopeController<UiTestSettings>(
+      { settings: { mutate } } as never,
+      { namespace: 'ui-test' },
+    )
+    scope.subscribe(() => { throw 'subscriber failed' })
+    const signal = new AbortController().signal
+
+    await expect(scope.set('preference', 'dark', signal)).rejects.toMatchObject({
+      message: 'settings operation failed',
+      cause: 'subscriber failed',
+    })
   })
 
   it('cancels queued and post-dispose writes while draining the in-flight mutation', async () => {

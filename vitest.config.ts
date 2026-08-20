@@ -18,6 +18,24 @@ const uncoveredLocationsReporter = fileURLToPath(new URL('./scripts/coverage-unc
 // lib/ never loads a second module-singleton copy.
 const pathsPlugin = (): ReturnType<typeof tsconfigPaths> => tsconfigPaths({ projects: ['./tsconfig.base.json'] })
 
+// The published remote-web-ui source imports the production browser entry,
+// whose module-loader wrapper is not an ESM test dependency. Its settings form
+// only needs the pure snapshot-store export, so keep this one source-level
+// regression on that exact module instead of loading the whole browser graph.
+const remoteSettingsStoreFacade = () => ({
+  name: 'deepseeker-remote-settings-store-facade',
+  enforce: 'pre' as const,
+  resolveId(source: string, importer: string | undefined) {
+    if (
+      source === '@deepseek-ai/dsh-client-runtime/client'
+      && importer?.includes('/dsh-remote-web-ui/src/client/settings-form.ts') === true
+    ) {
+      return fileURLToPath(new URL('./packages/client/runtime/src/client/contract/store.ts', import.meta.url))
+    }
+    return null
+  },
+})
+
 const windowsUnsupportedPackages = process.platform === 'win32'
   ? [
       // Bash-requiring suites (a real POSIX shell is unavailable on Windows).
@@ -89,6 +107,10 @@ const testIncludes = [
   'scripts/**/*.spec.ts',
 ]
 
+// External macOS volumes can materialize AppleDouble metadata beside a test.
+// It is binary Finder metadata, never executable source.
+const appleDoubleTests = ['**/._*']
+
 // The instrumented coverage gate sets this env; the exempt heavy suites then
 // run beside it uninstrumented (membership contract in scripts/coverage-exempt.ts).
 // A set-but-not-'1' value is a misconfiguration, not a silent no-op.
@@ -111,6 +133,7 @@ const processBoundTests = [
   'packages/context/time-context/tests/time-context.spec.ts',
   'packages/llm/llm-pi-ai/tests/adapter.spec.ts',
   'packages/boot/app-boot/tests/app-boot.spec.ts',
+  'packages/boot/app-boot/tests/user-patches.spec.ts',
   'packages/workflow/workflow-worker-thread/tests/session.spec.ts',
 ]
 
@@ -120,15 +143,22 @@ export default defineConfig({
     setupFiles: ['./scripts/test-invariants.ts'],
     // .tsx: client component specs (jsdom via per-file @vitest-environment pragma).
     include: testIncludes,
-    exclude: windowsUnsupportedTests,
+    exclude: [...windowsUnsupportedTests, ...appleDoubleTests],
     // One coverage invocation aggregates both projects. Every suite forks for
     // Node stability; process-bound suites stay separate for inventory control.
     projects: [
       {
-        plugins: [pathsPlugin(), standardDecoratorPlugin()],
+        plugins: [remoteSettingsStoreFacade(), pathsPlugin(), standardDecoratorPlugin()],
         test: {
           name: 'thread-safe',
           execArgv: vitestExecArgv,
+          server: {
+            deps: {
+              inline: [
+                /@linxin666\/dsh-remote-web-ui/,
+              ],
+            },
+          },
           // Node 24 has aborted in its CJS lexer (v8::ToLocalChecked Empty
           // MaybeLocal in cjs_lexer::Parse) from worker threads on macOS,
           // Linux, and Windows. Forked workers avoid that shared thread path.
@@ -136,6 +166,7 @@ export default defineConfig({
           setupFiles: ['./scripts/test-invariants.ts'],
           include: testIncludes,
           exclude: [
+            ...appleDoubleTests,
             ...windowsUnsupportedTests,
             ...processBoundTests,
             ...coverageExemptExcludes,
@@ -151,6 +182,7 @@ export default defineConfig({
           setupFiles: ['./scripts/test-invariants.ts'],
           include: processBoundTests,
           exclude: [
+            ...appleDoubleTests,
             ...windowsUnsupportedTests,
             ...coverageExemptExcludes,
           ],

@@ -1,0 +1,300 @@
+diff --git a/lib/client.js b/lib/client.js
+index 179b0191bda1ad6a8bd37075958489675093f472..e45ea68e6d68ecbc90ad918e88dffc84d68cfc36 100644
+--- a/lib/client.js
++++ b/lib/client.js
+@@ -25,6 +25,8 @@ window.__ModuleLoader__.load({
+ 		*/
+ 		/** Bridge route prefix (same-origin, loopback-only). */
+ 		const WEB_UI_SETTINGS_BRIDGE_PREFIX = "/api/dsh-web-ui-settings";
++		/** A bridge request must settle before the card-level save deadline. */
++		const BRIDGE_REQUEST_TIMEOUT_MS = 4e3;
+ 		//#endregion
+ 		//#region src/client/compat-settings-scope.ts
+ 		/**
+@@ -44,17 +46,35 @@ window.__ModuleLoader__.load({
+ 		*/
+ 		/**
+ 		* Build the fetch-backed settings face for the bridge routes. Network and
+-		* HTTP failures collapse into an ok:false envelope so the controller keeps
+-		* its unavailable state instead of throwing into plugin activation.
++		* HTTP failures are reported and collapse into an ok:false envelope so the
++		* controller keeps its unavailable state instead of throwing into activation.
+ 		* @param fetchFn - the fetch implementation (the global fetch on loopback).
+ 		* @returns the settings face.
+ 		*/
+-		function createBridgeApi(fetchFn) {
+-			const post = async (path, body) => {
++		function createBridgeApi(fetchFn, lifetimeSignal) {
++			let describeInFlight;
++			const post = async (path, body, reportError = true, operationSignal) => {
++				const controller = new AbortController();
++				let timedOut = false;
++				const abortForLifetime = () => {
++					controller.abort(lifetimeSignal.reason);
++				};
++				if (lifetimeSignal.aborted) abortForLifetime();
++				else lifetimeSignal.addEventListener("abort", abortForLifetime, { once: true });
++				const abortForOperation = () => {
++					controller.abort(operationSignal?.reason);
++				};
++				if (operationSignal?.aborted === true) abortForOperation();
++				else operationSignal?.addEventListener("abort", abortForOperation, { once: true });
++				const timer = setTimeout(() => {
++					timedOut = true;
++					controller.abort();
++				}, BRIDGE_REQUEST_TIMEOUT_MS);
+ 				try {
+ 					const response = await fetchFn(WEB_UI_SETTINGS_BRIDGE_PREFIX + path, {
+ 						method: "POST",
+ 						headers: { "content-type": "application/json" },
++						signal: controller.signal,
+ 						body: JSON.stringify(body)
+ 					});
+ 					if (!response.ok) return { result: {
+@@ -63,17 +83,38 @@ window.__ModuleLoader__.load({
+ 						message: "bridge HTTP " + response.status
+ 					} };
+ 					return { result: await response.json() };
+-				} catch {
++				} catch (error) {
++					const cancelled = (lifetimeSignal.aborted || operationSignal?.aborted === true) && !timedOut;
++					const message = cancelled ? "settings bridge cancelled" : timedOut ? "settings bridge timed out" : `settings bridge unreachable: ${error instanceof Error ? error.message : String(error)}`;
++					if (reportError && !cancelled) console.error(`dsh-web-ui-settings: ${message}`, error);
+ 					return { result: {
+ 						ok: false,
+ 						code: "internal",
+-						message: "settings bridge unreachable"
++						message
+ 					} };
++				} finally {
++					clearTimeout(timer);
++					lifetimeSignal.removeEventListener("abort", abortForLifetime);
++					operationSignal?.removeEventListener("abort", abortForOperation);
+ 				}
+ 			};
++			const describe = (payload) => {
++				if (describeInFlight !== void 0) return describeInFlight;
++				const request = (async () => {
++					const initial = await post("/describe", payload, false);
++					if (initial.result.ok || initial.result.message !== "settings bridge timed out" || lifetimeSignal.aborted) return initial;
++					await new Promise((resolve) => setTimeout(resolve, 100));
++					if (lifetimeSignal.aborted) return initial;
++					return post("/describe", payload);
++				})().finally(() => {
++					if (describeInFlight === request) describeInFlight = void 0;
++				});
++				describeInFlight = request;
++				return request;
++			};
+ 			return { settings: {
+-				describe: async (payload) => post("/describe", payload),
+-				mutate: async (payload) => post("/mutate", payload)
++				describe,
++				mutate: async (payload, signal) => post("/mutate", payload, true, signal)
+ 			} };
+ 		}
+ 		/**
+@@ -112,32 +153,34 @@ window.__ModuleLoader__.load({
+ 			load() {
+ 				return this.enqueue(() => this.read());
+ 			}
+-			set(field, value) {
++			set(field, value, signal) {
+ 				return this.enqueue(() => this.write({
+ 					op: "set",
+ 					path: [field],
+ 					value
+-				}));
++				}, signal), signal);
+ 			}
+-			unset(field) {
++			unset(field, signal) {
+ 				return this.enqueue(() => this.write({
+ 					op: "unset",
+ 					path: [field]
+-				}));
++				}, signal), signal);
+ 			}
+ 			/** Stop queued operations and wait for the current bridge call to settle. */
+ 			async dispose() {
+ 				this.disposed = true;
+ 				await this.tail;
+ 			}
+-			enqueue(operation) {
++			enqueue(operation, signal) {
+ 				if (this.disposed) return Promise.resolve();
++				if (signal?.aborted === true) return Promise.reject(abortReason(signal));
+ 				const task = this.tail.then(async () => {
+ 					if (this.disposed) return;
++					if (signal?.aborted === true) throw abortReason(signal);
+ 					await operation();
+ 				});
+ 				this.tail = task.catch(() => {});
+-				return task;
++				return abortable(task, signal);
+ 			}
+ 			async read() {
+ 				let response;
+@@ -166,7 +209,7 @@ window.__ModuleLoader__.load({
+ 				}
+ 				this.accept(view.value, view, writable);
+ 			}
+-			async write(op) {
++			async write(op, signal) {
+ 				const revision = this.getSnapshot().revision;
+ 				let response;
+ 				try {
+@@ -174,11 +217,13 @@ window.__ModuleLoader__.load({
+ 						ns: this.spec.namespace,
+ 						ops: [op],
+ 						...revision === void 0 ? {} : { expectedRevision: revision }
+-					});
++					}, signal);
+ 				} catch {
++					if (signal?.aborted === true) throw abortReason(signal);
+ 					await this.read();
+ 					return;
+ 				}
++				if (signal?.aborted === true) throw abortReason(signal);
+ 				if (!response.result.ok || this.disposed) {
+ 					await this.read();
+ 					return;
+@@ -199,6 +244,26 @@ window.__ModuleLoader__.load({
+ 				});
+ 			}
+ 		};
++		function abortReason(signal) {
++			return signal.reason instanceof Error ? signal.reason : new Error("settings bridge write aborted", { cause: signal.reason });
++		}
++		function abortable(work, signal) {
++			if (signal === void 0) return work;
++			if (signal.aborted) return Promise.reject(abortReason(signal));
++			return new Promise((resolve, reject) => {
++				const onAbort = () => {
++					reject(abortReason(signal));
++				};
++				signal.addEventListener("abort", onAbort, { once: true });
++				work.then((value) => {
++					signal.removeEventListener("abort", onAbort);
++					resolve(value);
++				}, (error) => {
++					signal.removeEventListener("abort", onAbort);
++					reject(error);
++				});
++			});
++		}
+ 		/**
+ 		* Wrap the official settings scope with the bridge fallback. The official
+ 		* scope stays authoritative whenever it serves the namespace; the bridge
+@@ -208,14 +273,15 @@ window.__ModuleLoader__.load({
+ 		*/
+ 		function createCompatScope(options) {
+ 			const { namespace, primary } = options;
+-			const fallback = options.fetchFn === void 0 ? void 0 : new BridgeScopeController(createBridgeApi(options.fetchFn), { namespace });
++			const fallback = options.bridgeApi === void 0 ? void 0 : new BridgeScopeController(options.bridgeApi, { namespace });
++			let disposed = false;
+ 			const store = (0, _deepseek_ai_dsh_client_runtime_client.createSnapshotStore)(project());
+ 			let fallbackStarted = false;
+ 			const publish = () => {
+-				store.set(project());
++				if (!disposed) store.set(project());
+ 			};
+ 			const startFallback = () => {
+-				if (fallback === void 0 || fallbackStarted) return;
++				if (fallback === void 0 || fallbackStarted || disposed) return;
+ 				fallbackStarted = true;
+ 				fallback.load();
+ 			};
+@@ -231,20 +297,27 @@ window.__ModuleLoader__.load({
+ 				};
+ 				return primarySnapshot;
+ 			}
+-			primary.subscribe(() => {
++			const disposePrimary = primary.subscribe(() => {
+ 				publish();
+ 				if (primary.getSnapshot().status === "unavailable") startFallback();
+ 			});
+-			fallback?.subscribe(publish);
++			const disposeFallback = fallback?.subscribe(publish);
+ 			if (primary.getSnapshot().status === "unavailable") startFallback();
+ 			return {
+ 				getSnapshot: () => store.getSnapshot(),
+ 				subscribe: (listener) => store.subscribe(listener),
+-				set: (field, value) => active().set(field, value),
+-				unset: (field) => active().unset(field),
++				set: (field, value, signal) => active().set(field, value, signal),
++				unset: (field, signal) => active().unset(field, signal),
+ 				load: async () => {
+ 					fallbackStarted = true;
+ 					await fallback?.load();
++				},
++				dispose: async () => {
++					if (disposed) return;
++					disposed = true;
++					disposePrimary();
++					disposeFallback?.();
++					await fallback?.dispose();
+ 				}
+ 			};
+ 			function active() {
+@@ -258,18 +331,28 @@ window.__ModuleLoader__.load({
+ 		* connection, so official behavior stays untouched wherever it works.
+ 		*/
+ 		var WebUiSettingsBinder = class extends _deepseek_ai_cordis.Service {
++			bridgeLifetime = new AbortController();
++			bridgeApi;
++			scopes = new Set();
+ 			constructor(ctx) {
+ 				super(ctx, "webUiSettings");
++				const loopback = ctx.get("connection")?.isLoopback === true;
++				this.bridgeApi = loopback ? createBridgeApi((input, init) => fetch(input, init), this.bridgeLifetime.signal) : void 0;
++				ctx.effect(() => () => {
++					for (const scope of this.scopes) scope.dispose();
++					this.scopes.clear();
++					this.bridgeLifetime.abort();
++				}, "web-ui-settings: bridge request lifetime");
+ 			}
+ 			bind(spec) {
+ 				const ctx = this.ctx;
+ 				const primary = ctx.get("settingsScope").bind(spec);
+-				const loopback = ctx.get("connection")?.isLoopback === true;
+ 				const scope = createCompatScope({
+ 					namespace: spec.namespace,
+ 					primary,
+-					fetchFn: loopback ? ((input, init) => fetch(input, init)) : void 0
++					bridgeApi: this.bridgeApi
+ 				});
++				this.scopes.add(scope);
+ 				ctx.effect(() => {
+ 					const remote = ctx.get("remote");
+ 					const disposers = [];
+@@ -282,6 +365,8 @@ window.__ModuleLoader__.load({
+ 					}));
+ 					return () => {
+ 						for (const dispose of disposers) dispose();
++						this.scopes.delete(scope);
++						scope.dispose();
+ 					};
+ 				}, "web-ui-settings: compat scope invalidation");
+ 				return scope;
+diff --git a/lib/index.js b/lib/index.js
+index b16ef0394b1dc705ce7bdb6a7a0838989cf9af64..33b17a390fddd9589108808f0b11163f36318a66 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -20,6 +20,7 @@ import { SettingsConflictError, settingsNamespace } from "@deepseek-ai/dsh-setti
+ /** Settings namespaces the dsh-web-ui family plugins register. */
+ const FAMILY_NAMESPACES = [
+ 	"dsh-ssh",
++	"describe-image",
+ 	"task-board",
+ 	"remote-web-ui",
+ 	"live-stats",
+@@ -34,6 +35,8 @@ const FAMILY_NAMESPACES = [
+ const NAMESPACE_ALIASES = {
+ 	"dsh-ssh": "dsh-ssh",
+ 	ssh: "dsh-ssh",
++	"dsh-tool-describe-image": "describe-image",
++	"describe-image": "describe-image",
+ 	"dsh-client-ui-task-board": "task-board",
+ 	"dsh-task-board": "task-board",
+ 	"task-board": "task-board",

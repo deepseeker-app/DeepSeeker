@@ -43,7 +43,8 @@ export class SettingsScopeController<T> implements SettingsScope<T> {
   private readonly store: SnapshotStore<SettingsScopeSnapshot<T>>
   private tail: Promise<void> = Promise.resolve()
   private readGeneration = 0
-  private writeGeneration = 0
+  private writeSequence = 0
+  private readonly pendingWrites = new Set<number>()
   private disposed = false
 
   /**
@@ -95,43 +96,62 @@ export class SettingsScopeController<T> implements SettingsScope<T> {
    * revision, and recovery contract.
    * @param field - scalar field inside the namespace section.
    * @param value - JSON-shaped value selected by the user.
+   * @param signal - optional cancellation while queued or crossing the wire.
    * @returns settlement after the write and any latest-write recovery read.
    */
-  set(field: string, value: unknown): Promise<void> {
-    return this.write({ op: 'set', path: [field], value })
+  set(field: string, value: unknown, signal?: AbortSignal): Promise<void> {
+    return this.write({ op: 'set', path: [field], value }, signal)
   }
 
   /**
    * Queue one field clear; see {@link SettingsScope.unset} for the ordering,
    * revision, and recovery contract.
    * @param field - scalar field inside the namespace section.
+   * @param signal - optional cancellation while queued or crossing the wire.
    * @returns settlement after the clear and any latest-write recovery read.
    */
-  unset(field: string): Promise<void> {
-    return this.write({ op: 'unset', path: [field] })
+  unset(field: string, signal?: AbortSignal): Promise<void> {
+    return this.write({ op: 'unset', path: [field] }, signal)
   }
 
-  private write(op: SettingsPathOpView): Promise<void> {
+  private write(op: SettingsPathOpView, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted === true) return Promise.reject(abortReason(signal))
     this.readGeneration += 1
-    const generation = ++this.writeGeneration
-    return this.enqueue(async () => {
+    const generation = ++this.writeSequence
+    this.pendingWrites.add(generation)
+    const forget = (): void => { this.pendingWrites.delete(generation) }
+    signal?.addEventListener('abort', forget, { once: true })
+    const result = this.enqueue(async () => {
       const revision = this.getSnapshot().revision
       let response: Awaited<ReturnType<SettingsFace['settings']['mutate']>>
       try {
-        response = await this.api.settings.mutate({
+        const payload = {
           ns: this.spec.namespace,
           ops: [op],
           ...(revision === undefined ? {} : { expectedRevision: revision }),
-        })
+        }
+        response = signal === undefined
+          ? await this.api.settings.mutate(payload)
+          : await this.api.settings.mutate(payload, signal)
       } catch (_settingsWriteFailure) {
-        if (!this.disposed && generation === this.writeGeneration) await this.read(++this.readGeneration)
+        if (signal?.aborted === true) throw abortReason(signal)
+        if (!this.disposed && this.isLatestWrite(generation)) {
+          await this.read(++this.readGeneration, signal)
+        }
         return
       }
+      if (signal?.aborted === true) throw abortReason(signal)
       if (!response.result.ok) {
-        if (!this.disposed && generation === this.writeGeneration) await this.read(++this.readGeneration)
+        if (!this.disposed && this.isLatestWrite(generation)) {
+          await this.read(++this.readGeneration, signal)
+        }
         return
       }
-      this.accept(response.result.value, generation === this.writeGeneration)
+      this.accept(response.result.value, !this.disposed && this.isLatestWrite(generation))
+    }, signal)
+    return result.finally(() => {
+      signal?.removeEventListener('abort', forget)
+      forget()
     })
   }
 
@@ -142,30 +162,31 @@ export class SettingsScopeController<T> implements SettingsScope<T> {
   async dispose(): Promise<void> {
     this.disposed = true
     this.readGeneration += 1
-    this.writeGeneration += 1
     await this.tail
   }
 
-  private enqueue(operation: () => Promise<void>): Promise<void> {
+  private enqueue(operation: () => Promise<void>, signal?: AbortSignal): Promise<void> {
     if (this.persistence === 'memory' || this.disposed) return Promise.resolve()
     const task = this.tail.then(async () => {
-      if (this.disposed) return
+      if (this.disposed || signal?.aborted === true) return
       await operation()
     })
     // The returned task carries its own settlement to the caller; the queue
     // tail is kept fulfilled so one failed subscriber cannot strand later operations.
     this.tail = task.catch(() => {})
-    return task
+    return abortable(task, signal)
   }
 
-  private async read(generation: number): Promise<void> {
+  private async read(generation: number, signal?: AbortSignal): Promise<void> {
     let response: Awaited<ReturnType<SettingsFace['settings']['describe']>>
     try {
-      response = await this.api.settings.describe({})
+      response = signal === undefined
+        ? await this.api.settings.describe({})
+        : await this.api.settings.describe({}, signal)
     } catch (_settingsReadFailure) {
       return
     }
-    if (!response.result.ok || this.disposed) return
+    if (!response.result.ok || this.disposed || signal?.aborted === true) return
     const { namespaces, writable } = response.result.value
     const view = namespaces.find(candidate => candidate.ns === this.spec.namespace)
     const publish = generation === this.readGeneration
@@ -179,6 +200,13 @@ export class SettingsScopeController<T> implements SettingsScope<T> {
       return
     }
     this.accept(view, publish, writable)
+  }
+
+  private isLatestWrite(generation: number): boolean {
+    for (const candidate of this.pendingWrites) {
+      if (candidate > generation) return false
+    }
+    return this.pendingWrites.has(generation)
   }
 
   private accept(view: SettingsNamespaceView, publish: boolean, writable?: boolean): void {
@@ -209,6 +237,32 @@ export class SettingsScopeController<T> implements SettingsScope<T> {
     }
     return failure === undefined ? view.value as T : undefined
   }
+}
+
+/** Let a caller stop waiting while the queue retains ownership until work settles. */
+function abortable<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (signal === undefined) return work
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => { reject(abortReason(signal)) }
+    signal.addEventListener('abort', onAbort, { once: true })
+    void work.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort)
+        resolve(value)
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort)
+        reject(error instanceof Error
+          ? error
+          : new Error('settings operation failed', { cause: error }))
+      },
+    )
+  })
+}
+
+function abortReason(signal: AbortSignal): Error {
+  const reason: unknown = signal.reason
+  return reason instanceof Error ? reason : new Error('settings write aborted', { cause: reason })
 }
 
 declare module '@deepseek-ai/cordis' {

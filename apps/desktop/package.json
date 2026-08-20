@@ -1,7 +1,7 @@
 {
   "name": "@deepseek-ai/dsh-desktop",
   "description": "DeepSeeker desktop agent powered by DeepSeek Harness",
-  "version": "0.1.0-rc.5",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "main": "lib/main.js",
@@ -11,10 +11,17 @@
     "dev": "pnpm --workspace-root run build && electron .",
     "package": "pnpm --workspace-root run build && node --import tsx scripts/stage-runtime.ts && node --import tsx scripts/ensure-electron-runtime.ts && node --import tsx scripts/package-desktop.ts",
     "dist": "pnpm --workspace-root run build && node --import tsx scripts/stage-runtime.ts && node --import tsx scripts/ensure-electron-runtime.ts && electron-builder",
-    "dist:mac": "node --import tsx scripts/release-mac.ts"
+    "dist:mac": "node --import tsx scripts/release-mac.ts",
+    "dist:win": "pnpm --workspace-root run build && node --import tsx scripts/stage-runtime.ts && node --import tsx scripts/ensure-electron-runtime.ts && electron-builder --win nsis --x64"
   },
   "license": "MIT",
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "node-pty": "^1.1.0"
+  },
   "devDependencies": {
+    "@electron/asar": "^3.4.1",
     "@types/node": "^22.20.0",
     "electron": "43.4.0",
     "electron-builder": "26.15.3",
@@ -28,6 +35,9 @@
     "electronDist": "node_modules/electron/dist",
     "afterPack": "./scripts/verify-packaged-runtime.ts",
     "asar": true,
+    "asarUnpack": [
+      "node_modules/node-pty/**/*"
+    ],
     "files": [
       "lib/**",
       "package.json"
@@ -58,8 +68,23 @@
     "win": {
       "icon": "build/icon.png",
       "target": [
-        "dir"
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
       ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "DeepSeeker",
+      "artifactName": "DeepSeeker-windows-x64-setup.${ext}"
     },
     "linux": {
       "category": "Development",

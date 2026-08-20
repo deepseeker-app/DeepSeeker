@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { RpcResponse } from '@deepseek-ai/dsh-api-remotes/client'
-import { refreshWelcomeIfLoaded, WelcomeNoticeStore } from '../src/client/welcome-store.ts'
+import {
+  refreshWelcomeIfLoaded,
+  WelcomeNoticeStore,
+  WELCOME_NOTICE_BROWSER_STORAGE_KEY,
+  type WelcomeNoticeBrowserStorage,
+} from '../src/client/welcome-store.ts'
 import {
   WELCOME_NOTICE_ACK_FIELD, WELCOME_NOTICE_SETTINGS_NAMESPACE, WELCOME_NOTICE_VERSION,
 } from '../src/onboarding-copy.ts'
@@ -31,19 +36,45 @@ function deferred<T>() {
 }
 
 describe('WelcomeNoticeStore', () => {
-  it('acknowledges in memory without calling loopback-only settings APIs', async () => {
+  it('persists a remote acknowledgement in the browser without calling Host settings APIs', async () => {
     const describe = vi.fn()
     const mutate = vi.fn()
-    const controller = new WelcomeNoticeStore({ settings: { describe, mutate } } as never, 'memory')
+    const values = new Map<string, string>()
+    const storage: WelcomeNoticeBrowserStorage = {
+      getItem: key => values.get(key) ?? null,
+      setItem: (key, value) => { values.set(key, value) },
+    }
+    const api = { settings: { describe, mutate } } as never
+    const controller = new WelcomeNoticeStore(api, 'browser', storage)
 
     await controller.load()
     expect(controller.store.getSnapshot()).toEqual({ status: 'ready', acknowledged: false, error: null })
     await expect(controller.acknowledge()).resolves.toBe(true)
     expect(controller.store.getSnapshot()).toEqual({ status: 'ready', acknowledged: true, error: null })
-    await controller.load()
-    expect(controller.store.getSnapshot()).toEqual({ status: 'ready', acknowledged: true, error: null })
+    expect(values.get(WELCOME_NOTICE_BROWSER_STORAGE_KEY)).toBe(WELCOME_NOTICE_VERSION)
+
+    const reloaded = new WelcomeNoticeStore(api, 'browser', storage)
+    await reloaded.load()
+    expect(reloaded.store.getSnapshot()).toEqual({ status: 'ready', acknowledged: true, error: null })
     expect(describe).not.toHaveBeenCalled()
     expect(mutate).not.toHaveBeenCalled()
+  })
+
+  it('reports unavailable remote browser storage instead of pretending to save', async () => {
+    const storage: WelcomeNoticeBrowserStorage = {
+      getItem: () => { throw new Error('blocked storage') },
+      setItem: () => { throw new Error('blocked storage') },
+    }
+    const controller = new WelcomeNoticeStore({ settings: {} } as never, 'browser', storage)
+
+    await controller.load()
+    expect(controller.store.getSnapshot()).toEqual({
+      status: 'error', acknowledged: false, error: 'blocked storage',
+    })
+    await expect(controller.acknowledge()).resolves.toBe(false)
+    expect(controller.store.getSnapshot()).toEqual({
+      status: 'error', acknowledged: false, error: 'blocked storage',
+    })
   })
 
   it('acknowledges only the exact current copy version', async () => {

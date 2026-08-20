@@ -65,17 +65,22 @@ export interface SettingsScope<T> {
   /**
    * Queue one field write. Rapid writes preserve mutation order, each carries
    * the latest known namespace revision, and only the latest settlement may
-   * publish; a rejected or failed latest write reloads Host state instead.
+   * publish; a rejected or failed latest write reloads Host state instead. A
+   * canceled write rejects with the signal's Error reason (or an Error carrying
+   * a non-Error reason as its cause), never performs a recovery read, and
+   * ignores a transport settlement that arrives after cancellation.
    * @param field - scalar field inside the namespace section.
    * @param value - JSON-shaped value selected by the user.
+   * @param signal - optional cancellation while queued or crossing the wire.
    * @returns settlement after the write and any latest-write recovery read.
    */
-  set(field: string, value: unknown): Promise<void>
+  set(field: string, value: unknown, signal?: AbortSignal): Promise<void>
   /**
    * Queue one field clear, so the field re-inherits the composition layer.
    * Shares {@link set}'s ordering, revision, and recovery contract.
    * @param field - scalar field inside the namespace section.
+   * @param signal - optional cancellation while queued or crossing the wire.
    * @returns settlement after the clear and any latest-write recovery read.
    */
-  unset(field: string): Promise<void>
+  unset(field: string, signal?: AbortSignal): Promise<void>
 }

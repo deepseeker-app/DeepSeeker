@@ -16,6 +16,12 @@
 import type { SettingsScope, SettingsScopeSnapshot } from '@deepseek-ai/dsh-client-runtime/client'
 import { createSnapshotStore, type SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 
+/** Maximum time one settings or credential write may hold the card. */
+export const FIELD_WRITE_TIMEOUT_MS = 4_000
+
+/** Maximum time one save gesture may hold the card across all staged writes. */
+export const SAVE_TIMEOUT_MS = 10_000
+
 /** The write one field's staged text performs when the card is saved. */
 export type FieldWrite =
   | { kind: 'set'; value: unknown }
@@ -43,7 +49,7 @@ export interface CardSecretSpec {
   /** Field name addressing this control inside the card's form. */
   field: string
   /** Write the staged text; resolves to whether the Host accepted it. */
-  write: (text: string) => Promise<boolean>
+  write: (text: string, signal: AbortSignal) => Promise<boolean>
 }
 
 /** One field as a card's control renders it. */
@@ -74,6 +80,8 @@ export interface CardShell {
   saving: boolean
   /** Whether the last save did not land as staged; cleared by the next edit or save. */
   failed: boolean
+  /** Localized detail key for a thrown save failure; a Host refusal needs only the general message. */
+  error: 'saveTimedOut' | 'saveError' | null
 }
 
 /** The write actions every plugin card's slot entry injects. */
@@ -104,7 +112,7 @@ interface PlannedWrite {
    * Perform the write and report whether the Host holds the staged value
    * afterwards; undefined when the draft is not a value the field accepts.
    */
-  run: (() => Promise<boolean>) | undefined
+  run: ((signal: AbortSignal) => Promise<boolean>) | undefined
 }
 
 /**
@@ -159,6 +167,7 @@ export class CardForm<T> {
   private readonly listeners = new Set<() => void>()
   private saving = false
   private failed = false
+  private error: CardShell['error'] = null
 
   /**
    * @param scope - the bound settings scope for this card's namespace.
@@ -200,6 +209,7 @@ export class CardForm<T> {
       invalid: plan.some(item => item.run === undefined),
       saving: this.saving,
       failed: this.failed,
+      error: this.error,
     }
   }
 
@@ -235,11 +245,16 @@ export class CardForm<T> {
       resetField: (field) => {
         this.stage(field, { text: this.spec(field).format(this.baseValue(field)), clear: true })
       },
-      save: () => { void this.save() },
+      save: () => {
+        // save() already publishes a user-visible failure; event actions must
+        // also consume its rejection so a failed click is not unhandled.
+        void this.save().catch((_publishedSaveFailure: unknown) => {})
+      },
       discard: () => {
         if (this.staged.size === 0 && !this.failed) return
         this.staged.clear()
         this.failed = false
+        this.error = null
         this.publish()
       },
     }
@@ -258,17 +273,49 @@ export class CardForm<T> {
     const plan = this.plan()
     const writes = plan.flatMap(item => item.run === undefined ? [] : [item.run])
     if (plan.length === 0 || this.saving || writes.length !== plan.length) return
+    const submitted = new Map(this.staged)
     this.saving = true
     this.failed = false
+    this.error = null
     this.publish()
-    let landed = true
-    for (const write of writes) {
-      landed = await write() && landed
+    const controller = new AbortController()
+    try {
+      const writeAll = async (): Promise<boolean> => {
+        let landed = true
+        for (const [index, write] of writes.entries()) {
+          landed = await withTimeout(
+            write(controller.signal),
+            FIELD_WRITE_TIMEOUT_MS,
+            `settings field write ${index + 1} timed out`,
+            controller,
+          ) && landed
+        }
+        return landed
+      }
+      const landed = await withTimeout(
+        writeAll(),
+        SAVE_TIMEOUT_MS,
+        'settings save timed out',
+        controller,
+      )
+      if (landed) {
+        for (const [field, edit] of submitted) {
+          if (this.staged.get(field) === edit) this.staged.delete(field)
+        }
+      }
+      else this.failed = true
+    } catch (error: unknown) {
+      const failure = error instanceof Error
+        ? error
+        : new Error('settings save failed', { cause: error })
+      if (!controller.signal.aborted) controller.abort(failure)
+      this.failed = true
+      this.error = failure instanceof SaveTimeoutError ? 'saveTimedOut' : 'saveError'
+      throw failure
+    } finally {
+      this.saving = false
+      this.publish()
     }
-    if (landed) this.staged.clear()
-    this.saving = false
-    this.failed = !landed
-    this.publish()
   }
 
   /**
@@ -283,36 +330,37 @@ export class CardForm<T> {
       const secret = this.secretSpecs.get(field)
       if (secret !== undefined) {
         const value = staged.text.trim()
-        if (value !== '') plan.push({ field, run: () => secret.write(value) })
+        if (value !== '') plan.push({ field, run: signal => secret.write(value, signal) })
         continue
       }
       const spec = this.spec(field)
       if (staged.clear) {
-        if (this.stored(field)) plan.push({ field, run: () => this.clear(field) })
+        if (this.stored(field)) plan.push({ field, run: signal => this.clear(field, signal) })
         continue
       }
       if (staged.text === spec.format(this.sectionValue(field))) continue
       const write = spec.parse(staged.text)
       if (write === undefined) plan.push({ field, run: undefined })
-      else if (write.kind === 'clear') plan.push({ field, run: () => this.clear(field) })
-      else plan.push({ field, run: () => this.store(field, write.value) })
+      else if (write.kind === 'clear') plan.push({ field, run: signal => this.clear(field, signal) })
+      else plan.push({ field, run: signal => this.store(field, write.value, signal) })
     }
     return plan
   }
 
-  private async clear(field: string): Promise<boolean> {
-    await this.scope.unset(field)
+  private async clear(field: string, signal: AbortSignal): Promise<boolean> {
+    await this.scope.unset(field, signal)
     return !this.stored(field)
   }
 
-  private async store(field: string, value: unknown): Promise<boolean> {
-    await this.scope.set(field, value)
+  private async store(field: string, value: unknown, signal: AbortSignal): Promise<boolean> {
+    await this.scope.set(field, value, signal)
     return this.userLayer()?.[field] === value
   }
 
   private stage(field: string, edit: StagedEdit): void {
     this.staged.set(field, edit)
     this.failed = false
+    this.error = null
     this.publish()
   }
 
@@ -347,5 +395,30 @@ export class CardForm<T> {
 
   private publish(): void {
     for (const listener of this.listeners) listener()
+  }
+}
+
+/** Error used to distinguish an expired UI deadline from another write failure. */
+class SaveTimeoutError extends Error {}
+
+/** Reject and cancel work that does not settle before its UI deadline. */
+async function withTimeout<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+  message: string,
+  controller: AbortController,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      const error = new SaveTimeoutError(message)
+      reject(error)
+      controller.abort(error)
+    }, timeoutMs)
+  })
+  try {
+    return await Promise.race([operation, timeout])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
   }
 }

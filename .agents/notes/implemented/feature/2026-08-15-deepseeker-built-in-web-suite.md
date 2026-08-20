@@ -1,0 +1,35 @@
+# Agent Note: DeepSeeker ships the Web feature suite
+
+Status: implemented
+
+English | [中文](2026-08-15-deepseeker-built-in-web-suite.zh.md)
+
+## Problem
+
+The desktop application needs the useful parts of `dsh-web-ui` without asking ordinary users to install and compose eleven plugins themselves. An aggregate-only dependency is insufficient because image understanding is outside that aggregate, pnpm's isolated dependency links were not traversed by installation fallback healing, and several published packages need local compatibility fixes.
+
+## Decision
+
+`@deepseek-ai/dsh-web-app` pins `@linxin666/dsh-web-ui-all` and `@linxin666/dsh-tool-describe-image` to `0.1.12`. Its browser roster mounts the aggregate compatibility layer, plugin settings, AionUI file and preview panel, task board, Git graph, desktop pet, remote Web UI, live statistics, SSH, image understanding, and skin center as eleven explicit Loader rows. The aggregate supplies the remaining transitive packages, including nine skins, at the same version.
+
+Installation fallback healing resolves every discovered package directory through `realpathSync` before scanning its manifest. This follows pnpm's virtual-store links into each package's isolated `node_modules` and exposes the full plugin closure in the profile fallback directory.
+
+Ten pnpm patches remain part of the shipped dependency record. The skin center searches `$DSH_HOME/profiles/node_modules/@linxin666` for the skin carrier. The Web UI settings bridge exposes the image-understanding namespace. The task board keeps 180-pixel minimum columns and scrolls horizontally when the viewport cannot fit all five. The pet clamps saved and dragged positions, including its summon control, to the current viewport. Its state loop permits one in-flight request per tab, times out a stalled call, backs off after failures, and releases the request, timer, settings subscriptions, and React root when the plugin leaves. AionUI omits `._*` AppleDouble sidecars from its file tree and search; its layout assigns zero width to the file and preview columns below 580 CSS pixels and hides the unusable floating expand button. Wider layouts keep the upstream resizable behavior.
+
+The browser HMR driver exposes one shared EventSource service. HMR, AionUI, Git graph, and the task board use Web Locks to elect one owner per same-origin stream and relay frames through `BroadcastChannel`: `plugins` receives the default `/plugins/events` messages, `aionui-panel:${root}` and `git:${path}` receive named `change` events, and `task-board` receives default messages. The event name is part of the coordination key, so named and default events cannot collide. Tabs without those browser primitives keep the original local EventSource. This prevents two desktop tabs from consuming Chromium's six HTTP/1.1 connections before settings or pairing can run while preserving hot reload and every feature-specific event.
+
+The SSH patch records a SHA-256 host-key fingerprint on first use and verifies the key again for the target and every ProxyJump hop. A changed key fails without retry. Updating or deleting a host closes its tunnels and pooled connections so an established session cannot retain the old endpoint. SSH HTTP and WebSocket routes require both a loopback TCP peer and a loopback Host. The remote HTTP authorizer also rejects the desktop shortcut whenever a request carries a Cloudflare or standard proxy client header, even if the proxy connects over loopback and rewrites Host. The image patch applies cross-site and Origin checks before accepting either a real loopback request or the remote plugin's live pairing decision; a denied upload or raw-image read returns 403 before reading the body or attachment store.
+
+Phone access remains opt-in. The Web command rejects `--host 0.0.0.0`, and the remote panel directs users to the auto-tunnel setting. The remote plugin opens a Cloudflare quick tunnel only after the user enables it. After an initial `lan-required` response, the pairing panel keeps its status stream open and remints automatically when the first tunnel URL arrives; close, reopen, and unmount abort the run and detach the stream. Its simplified mobile API exposes workspace listing, a bounded set of session operations, and the session event stream; settings, credentials, host actions, goals, subagents, SSH management, and the SSH terminal are absent from that prefix. The mobile workspace and session-list views do not open a session event stream. Only the chat view opens one, and leaving that view closes it immediately. Blank sessions use the `New session` label in both the list and chat header instead of inheriting the workspace name. The shared Web API accepts a live paired-device cookie for ordinary methods, while host-native actions, configuration and credential access, agent-preset authoring, model discovery, and loopback-designated plugin endpoints remain local. The Web bundle enables `requireRemoteAuthorization`, so non-loopback shared API and WebSocket requests fail closed whenever the remote authorizer has not mounted or has been disposed. The mobile transcript renders only messages whose `source.kind` is `user`; runtime context, skill catalogs, agent instructions, and future non-user sources stay off the phone. History pagination advances by raw event sequence even when a page folds to no visible messages. Each page requests five messages because tool-heavy turns can expand into thousands of raw events; mobile unary calls abort after 15 seconds so a broken tunnel becomes an error instead of a permanent loader. The third-party notices conservatively record both Apache-2.0 and the BSD-3-Clause license file shipped inside `dsh-web-ui-all`.
+
+## Alternatives considered
+
+**Copy the upstream source into this repository.** Rejected because a source fork would make every upstream fix a manual merge and would blur ownership of the external code. Pinned packages plus small reviewed patches keep the difference inspectable.
+
+**Mount only the aggregate bundle.** Rejected because it omits image understanding and leaves the assembled roster implicit. Explicit rows make the desktop feature set testable while the aggregate remains the dependency carrier.
+
+**Bind the Web server to all interfaces by default.** Rejected because it would expose a coding agent on the local network without a deliberate user action. The temporary tunnel keeps public exposure visible and reversible.
+
+## Consequences
+
+Source runs, installed profiles, and desktop packages use the same pinned feature set. Focused bundle tests reject a missing or reordered external row, a drifting version, accidental loss of image understanding, stale SSH connections after configuration changes, changed host keys, and unauthenticated image traffic. Dependency installation and packaging include the Cloudflare and SSH runtime dependencies, so release size increases. The SSH regression uses a controlled local SSH socket; real phone pairing over 5G, a public tunnel, an external SSH host, a vision-model call, and Windows packaging still require environment-specific acceptance tests.

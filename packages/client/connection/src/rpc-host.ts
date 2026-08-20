@@ -12,7 +12,7 @@ import {
   type ServerResponse as RpcServerResponse,
 } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { bridge, type FetchHandler } from './http-bridge.ts'
-import { isTrustedApiRequest } from './api-request-trust.ts'
+import { isLoopbackApiRequest, isTrustedApiRequest } from './api-request-trust.ts'
 import { API_PATH } from './api-path.ts'
 import type {
   ConnectionRpcEndpointMatcher,
@@ -87,6 +87,20 @@ export class HostConnectionService extends Service implements HostConnectionHand
     }
   }
 
+  /**
+   * Whether a claimed shared endpoint belongs to a loopback-only interceptor.
+   * @param channel - the shared API channel.
+   * @param endpoint - the parsed RPC endpoint, or undefined for an invalid path.
+   * @returns true when the endpoint is claimed and restricted to loopback requests.
+   */
+  requiresLoopbackAuthority(channel: '/api', endpoint: string | undefined): boolean {
+    if (endpoint === undefined) return false
+    const interceptor = this.interceptors.get(channel)
+    return interceptor !== undefined
+      && interceptor.matches(endpoint)
+      && interceptor.options.authority === 'loopback'
+  }
+
   private register(
     owner: Context,
     channel: string,
@@ -100,7 +114,8 @@ export class HostConnectionService extends Service implements HostConnectionHand
       kind: 'prefix',
       path: channel,
       handler: async (req, res) => {
-        if (!isTrustedApiRequest(req, trustedHosts)) {
+        if (!isTrustedApiRequest(req, trustedHosts)
+          || (options.authority === 'loopback' && !isLoopbackApiRequest(req))) {
           res.writeHead(403)
           res.end('forbidden')
           return
