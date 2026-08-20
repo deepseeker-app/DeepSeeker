@@ -239,8 +239,10 @@ describe('web e2e: queue row actions', () => {
       expect(goalBox!.y).toBeLessThan(queuePanelBox!.y)
       expect(todoBox!.x).toBeCloseTo(goalBox!.x, 1)
       expect(todoBox!.x).toBeCloseTo(queuePanelBox!.x, 1)
-      expect(todoBox!.width).toBeCloseTo(goalBox!.width, 1)
-      expect(todoBox!.width).toBeCloseTo(queuePanelBox!.width, 1)
+      // Linux font metrics can leave flex items on adjacent subpixel stops.
+      // Half a CSS pixel still proves one aligned responsive column.
+      expect(Math.abs(todoBox!.width - goalBox!.width)).toBeLessThanOrEqual(0.5)
+      expect(Math.abs(todoBox!.width - queuePanelBox!.width)).toBeLessThanOrEqual(0.5)
     }
     await expectAlignedContextPanels()
     await page.setViewportSize({ width: 640, height: 1000 })

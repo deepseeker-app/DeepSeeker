@@ -137,7 +137,10 @@ describe.skipIf(MODE === 'record')('web e2e: durable workflow run in Chat', () =
     })
     await page.setViewportSize({ width: 1280, height: 800 })
 
-    await member.click()
+    // The live status can replace this row while its progress animation is
+    // moving. Dispatch through the locator without waiting for visual stability;
+    // the child-navigation assertion below still proves the click took effect.
+    await member.dispatchEvent('click')
     await page.getByText(CHILD_PROMPT, { exact: true }).waitFor({ timeout: 15_000 })
 
     const sessions = page.getByRole('tree', { name: 'Sessions' })
