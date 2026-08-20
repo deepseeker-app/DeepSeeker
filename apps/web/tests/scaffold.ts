@@ -821,6 +821,10 @@ function normalizeAria(snapshot: string, workspaceCwd: string): string {
       duration => duration.startsWith('约') ? duration : '{{duration}}',
     )
     .replace(/\d+(?:\.\d+)?(?= tok\/s(?!\w))/g, '{{throughput}}')
+    // Chromium may expose the stats strip as one text node or split its TPS
+    // child into a sibling. A hovered stats tooltip is transient pointer state.
+    .replace(/\n- tooltip "\d+ turns ·[^\n]+"/g, '')
+    .replace(/(- text: \d+ turns ·[^\n]+)\n- text: (TPS [^\n]+)/g, '$1 $2')
     // Seeded compaction prices realized file paths, whose length differs
     // between local worktrees and CI scratch directories.
     .replace(/(Compacted \d+ history items \(~)\d+( tokens\))/g, '$1{{tokens}}$2')

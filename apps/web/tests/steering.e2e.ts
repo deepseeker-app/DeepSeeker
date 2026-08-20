@@ -357,7 +357,11 @@ describe('web e2e: empty-draft Cmd+Enter steers the whole queue', () => {
     // The reasoning row streams independently of the steering handoff. Wait
     // for the block to settle so the mid snapshot does not race its transient
     // visually-hidden Running label while the question keeps the turn open.
+    // The stats strip commits independently too; on a slower Linux runner the
+    // tool row can settle before its TPS node appears in the accessibility tree.
     await page.locator('[data-variant="think"][data-state="ok"]').first().waitFor({ timeout: 10_000 })
+    await page.locator('[class*="centerCol"]').getByText(/^TPS \d+(?:\.\d+)? tok\/s$/).first()
+      .waitFor({ timeout: 10_000 })
     const mid = await captureStableAria(page, '[class*="centerCol"]', scaffold.workspaceCwd)
     await compareOrRefreshGolden(STEER_ALL_MID, mid, MODE)
 
