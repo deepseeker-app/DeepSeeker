@@ -18,6 +18,19 @@ const uncoveredLocationsReporter = fileURLToPath(new URL('./scripts/coverage-unc
 // lib/ never loads a second module-singleton copy.
 const pathsPlugin = (): ReturnType<typeof tsconfigPaths> => tsconfigPaths({ projects: ['./tsconfig.base.json'] })
 
+// Source-imported third-party clients must resolve this workspace peer without
+// relying on lib/ artifacts that do not exist in a fresh CI checkout.
+const inlineWorkspacePeerFacade = () => ({
+  name: 'deepseeker-inline-workspace-peer-facade',
+  enforce: 'pre' as const,
+  resolveId(source: string) {
+    if (source === '@deepseek-ai/dsh-client-ui-primitives') {
+      return fileURLToPath(new URL('./packages/client/ui-primitives/src/index.ts', import.meta.url))
+    }
+    return null
+  },
+})
+
 // The published remote-web-ui source imports the production browser entry,
 // whose module-loader wrapper is not an ESM test dependency. Its settings form
 // only needs the pure snapshot-store export, so keep this one source-level
@@ -148,7 +161,12 @@ export default defineConfig({
     // Node stability; process-bound suites stay separate for inventory control.
     projects: [
       {
-        plugins: [remoteSettingsStoreFacade(), pathsPlugin(), standardDecoratorPlugin()],
+        plugins: [
+          inlineWorkspacePeerFacade(),
+          remoteSettingsStoreFacade(),
+          pathsPlugin(),
+          standardDecoratorPlugin(),
+        ],
         test: {
           name: 'thread-safe',
           execArgv: vitestExecArgv,

@@ -64,8 +64,10 @@ describe('paired-device persistence', () => {
     expect(first.hasDevice('phone-cookie')).toBe(true)
     expect(existsSync(filename)).toBe(true)
     expect(readFileSync(filename, 'utf8')).not.toContain('phone-cookie')
-    expect(statSync(filename).mode & 0o777).toBe(0o600)
-    expect(statSync(join(root, 'remote-web-ui')).mode & 0o777).toBe(0o700)
+    if (process.platform !== 'win32') {
+      expect(statSync(filename).mode & 0o777).toBe(0o600)
+      expect(statSync(join(root, 'remote-web-ui')).mode & 0o777).toBe(0o700)
+    }
 
     const restarted = new PairingService(config, clock([], 10_000), new FilePairingPersistence(filename))
     restarted.setPublicBaseUrl('https://remote.example')

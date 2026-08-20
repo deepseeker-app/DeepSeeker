@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { afterPack } from '../scripts/verify-packaged-runtime.ts'
+import { afterPack, normalizeAsarEntry } from '../scripts/verify-packaged-runtime.ts'
 
 function context(appOutDir: string, electronPlatformName = 'darwin') {
   return {
@@ -14,6 +14,10 @@ function context(appOutDir: string, electronPlatformName = 'darwin') {
 }
 
 describe('packaged desktop runtime verification', () => {
+  it('normalizes Windows ASAR entries to portable archive paths', () => {
+    expect(normalizeAsarEntry('\\lib\\main.js')).toBe('/lib/main.js')
+  })
+
   it('accepts the packaged Host entrypoints and unpacked native terminal dependency', async () => {
     const appOutDir = await mkdtemp(join(tmpdir(), 'dsh-packaged-runtime-'))
     try {

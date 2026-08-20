@@ -63,8 +63,10 @@ describe('configuration-scheme names and storage', () => {
 
     const statePath = join(userData, 'configuration-schemes', 'state.json')
     const metadataPath = join(userData, 'configuration-schemes', created.id, 'metadata.json')
-    expect(statSync(statePath).mode & 0o777).toBe(0o600)
-    expect(statSync(metadataPath).mode & 0o777).toBe(0o600)
+    if (process.platform !== 'win32') {
+      expect(statSync(statePath).mode & 0o777).toBe(0o600)
+      expect(statSync(metadataPath).mode & 0o777).toBe(0o600)
+    }
     expect(lstatSync(join(userData, 'configuration-schemes')).isSymbolicLink()).toBe(false)
   })
 
